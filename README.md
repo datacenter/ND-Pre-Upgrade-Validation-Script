@@ -1,8 +1,41 @@
 # ND-Pre-Upgrade-Validation-Script
 
-This script performs generic health checks as well as signature based checks against all ND nodes in a cluster.
+The script checks for issues that are known to have an impact to the success of a Nexus Dashboard upgrade. Identification and remediation of such issues prior to upgrade can lead to more successful outcomes.
 
 The script can be run from any Linux server with the required dependencies. If ACI APICs are available and have connectivity towards the ND management address, the script can be run from an APIC.
+
+## Table of Contents
+
+- [Checks](#checks)
+- [Dependencies and Installation](#dependencies-and-installation)
+  - [Python Requirements](#python-requirements)
+  - [Installing Dependencies](#installing-dependencies)
+  - [Dependencies Overview](#dependencies-overview)
+- [Usage](#usage)
+  - [Compatibility Notes](#compatibility-notes)
+  - [Example Run](#example-run)
+- [Support](#support)
+
+## Checks
+
+**Note:** Some of the checks are version specific and might not apply to the current running version of Nexus Dashboard in your environment. In the event that the check is not relevant, the check will be a "PASS".
+
+| # | Check | Description | Reference |
+|---|-------|-------------|-----------|
+| 1 | Techsupport | Verify the script could successfully extract the tech support to perform additional checks | |
+| 2 | Version | Verify all cluster nodes are running the same version | |
+| 3 | Node status | Verify all cluster nodes are in an Active state | |
+| 4 | Ping check | Verify node can ping all Mgmt and Data IPs in the cluster | |
+| 5 | Subnet check | Verify Mgmt and Data interfaces are on different subnets | [Link](https://www.cisco.com/c/en/us/td/docs/dcn/nd/3x/deployment/cisco-nexus-dashboard-and-services-deployment-guide-311/nd-prerequisites-platform-31x.html#concept_fdf_fxg_4mb) |
+| 6 | Persistent IP check | Verify at lest 5 Persistent IP address are configured in data-external-services | [Link](https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/cisco-nexus-dashboard-deployment-guide-41x/nd-prerequisites-41x.html#concept_zkj_3hj_cgc) |
+| 7 | Disk space | Verify all directories are under 70% utilization | |
+| 8 | Pod status | Verify all Pods and Services are in a healthy state | |
+| 9 | System health | Verify all nodes are healthy using 'acs health' command | |
+| 10 | Certificate check | Verify no certificates have non-alphanumeric characters | [Link](https://bst.cisco.com/bugsearch/bug/CSCwm35992) |
+| 11 | ISO check | Verify multiple ISOs aren't found in boothook | [Link](https://bst.cisco.com/bugsearch/bug/CSCwn94394) |
+| 12 | Lvm Pvs check | Verify no empty ElasticSearch PVs are found | [Link](https://bst.cisco.com/bugsearch/bug/CSCwe91228) |
+| 13 | atom0 NVME check | Verify no NVME drive hardware failures are present in Physical node setups | |
+| 14 | atom0 vg check | Verify there is more than 50% free space in atom0 virtual group | [Link](https://bst.cisco.com/bugsearch/bug/CSCwr43515) |
 
 ## Dependencies and Installation
 
@@ -48,12 +81,6 @@ Place the main script `ND-Preupgrade-Validation.py` and the worker script `worke
 ### Compatibility Notes
 - The main script is currently only compatible with Python 3.7+ but will be modified in the future.
 - The worker script is Python 2.7+ compatible to accommodate ND nodes on versions prior to 3.0.
-
-### Support
-- Feedback and questions are welcome.
-- If you have feedback or are encountering an issue running the script, please send an email to nd-preupgrade-validation@cisco.com
-- If the script is recommending to open a Cisco TAC SR for any specific issue, please open a Cisco TAC SR.
-- Running this script is not a requirement but it is intended to provide additional reassurance when planning for a Nexus Dashboard upgrade.
 
 ### Example Run:
 ```
@@ -302,3 +329,10 @@ total 92K
 -rw-r--r--. 1 root root 5.1K Oct 20 20:23 validation_details.json
 -rw-r--r--. 1 root root 5.6K Oct 20 20:23 validation_summary.txt
 ```
+
+## Support
+
+- Feedback and questions are welcome.
+- If you have feedback or are encountering an issue running the script, please send an email to nd-preupgrade-validation@cisco.com
+- If the script is recommending to open a Cisco TAC SR for any specific issue, please open a Cisco TAC SR.
+- Running this script is not a requirement but it is intended to provide additional reassurance when planning for a Nexus Dashboard upgrade.
