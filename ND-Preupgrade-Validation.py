@@ -337,7 +337,7 @@ def check_system_resources():
     try:
         conn_count = int(subprocess.check_output(
             "netstat -ant | grep ESTABLISHED | grep ':22' | wc -l", 
-            shell=True, text=True
+            shell=True, universal_newlines=True
         ).strip())
         resources["current_connections"] = conn_count
         logger.debug(f"Currently active SSH connections: {conn_count}")
@@ -670,6 +670,78 @@ class NDNodeManager:
         except Exception as e:
             logger.error(f"Error parsing size '{size_str}': {str(e)}")
             return 0
+    
+    def check_node_disk_space(self, node):
+        """
+        Check all directory usage on a node and report any over 80%.
+        Returns: (is_healthy, over_threshold_dirs, error_message)
+        
+        Args:
+            node: Node dictionary with 'name' and 'ip'
+        
+        Returns:
+            tuple: (bool, list, str) - (is_healthy, list of (dir, usage) tuples, error_msg)
+        """
+        import subprocess
+        
+        try:
+            logger.info(f"Checking disk space on {node['name']}")
+            df_cmd = self.build_ssh_command(node['ip'], "df -h")
+            process = subprocess.Popen(df_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate(timeout=30)
+            
+            if process.returncode != 0:
+                error_msg = f"Failed to check disk space: {stderr.decode('utf-8')}"
+                logger.error(f"{node['name']}: {error_msg}")
+                return False, [], error_msg
+            
+            # Parse df output
+            df_output = stdout.decode('utf-8').strip()
+            logger.debug(f"{node['name']} df output:\n{df_output}")
+            
+            over_threshold = []
+            
+            for line in df_output.split('\n'):
+                # Skip header line and empty lines
+                if not line.strip() or line.startswith('Filesystem'):
+                    continue
+                
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+                
+                # Get usage percentage (column 4, includes % sign)
+                usage_str = parts[4].rstrip('%')
+                try:
+                    usage_pct = float(usage_str)
+                except ValueError:
+                    continue
+                
+                # Get mount point (last column)
+                mount_point = parts[5]
+                
+                # Check if usage >= 80%
+                if usage_pct >= 80:
+                    over_threshold.append((mount_point, usage_pct))
+                    logger.warning(f"{node['name']}: {mount_point} is at {usage_pct}% usage")
+            
+            if over_threshold:
+                # Sort by usage percentage (highest first)
+                over_threshold.sort(key=lambda x: x[1], reverse=True)
+                error_msg = f"Found {len(over_threshold)} director{'y' if len(over_threshold) == 1 else 'ies'} over 80% usage"
+                return False, over_threshold, error_msg
+            
+            logger.info(f"{node['name']}: All directories under 80% usage threshold")
+            return True, [], ""
+            
+        except subprocess.TimeoutExpired:
+            error_msg = "Command timeout while checking disk space"
+            logger.error(f"{node['name']}: {error_msg}")
+            return False, [], error_msg
+        except Exception as e:
+            error_msg = f"Unexpected error checking disk space: {str(e)}"
+            logger.exception(f"{node['name']}: {error_msg}")
+            return False, [], error_msg
     
     def discover_nodes(self):
         """Discover all nodes in the ND cluster using sshpass instead of pexpect"""
@@ -1050,11 +1122,12 @@ class TechSupportManager:
                 print(f"Tech support command executed on {node['name']} with no output, checking for file generation...")
             
             # Wait and retry loop to wait for the tech support to be generated
-            max_retries = 30
+            # HARD LIMIT: Maximum 5 retries = 2.5 minutes total wait time
+            MAX_RETRIES = 5
             retry_interval = 30
             
             logger.info(f"Waiting for tech support generation to complete on {node['name']}...")
-            print(f"Waiting for tech support generation to complete on {node['name']}. This may take several minutes...")
+            print(f"Waiting for tech support generation to complete on {node['name']}. This may take up to {MAX_RETRIES * retry_interval // 60} minutes...")
             
             # Record all existing tech support files to detect new ones
             cmd_existing = self.node_manager.build_ssh_command(node['ip'], f"find {self.tech_dir} -name '*{node['name']}.tgz' -type f -printf '%T@ %p\\n'")
@@ -1073,13 +1146,18 @@ class TechSupportManager:
             
             # Now wait and look for a new file with timestamp AFTER our pre_command_timestamp
             found_tech_support = None
+            no_processes_detected = False
             
-            for retry in range(max_retries):
+            for retry in range(MAX_RETRIES):
                 time.sleep(retry_interval)
+                retry_number = retry + 1
+                
+                logger.info(f"Tech support check attempt {retry_number}/{MAX_RETRIES} for {node['name']}")
+                print(f"Checking for tech support file (attempt {retry_number}/{MAX_RETRIES})...")
                 
                 # On first few retries, check if tech support processes are actually running
                 # This helps detect early if the command failed to start properly
-                if retry < 3:  # Check on first 3 retries (first 1.5 minutes)
+                if retry < 3 and not no_processes_detected:  # Check on first 3 retries (first 1.5 minutes)
                     logger.debug(f"Checking if tech support processes are running on {node['name']}")
                     cmd_check_processes = self.node_manager.build_ssh_command(node['ip'], "ps aux | grep -i techsupport | grep -v grep || echo 'no_processes'")
                     process = subprocess.Popen(cmd_check_processes, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1087,13 +1165,13 @@ class TechSupportManager:
                     
                     if process.returncode == 0:
                         ps_output = stdout_ps.decode('utf-8').strip()
-                        if "no_processes" in ps_output and retry >= 2:  # After 1 minute, no processes found
-                            logger.warning(f"No tech support processes running on {node['name']} after {(retry+1)*retry_interval} seconds")
-                            print(f"Warning: No tech support processes detected on {node['name']}. The command may have failed.")
-                            # Don't return None immediately, but reduce max retries significantly
-                            max_retries = min(max_retries, 5)  # Reduce to 2.5 minutes total wait
-                        elif "no_processes" not in ps_output:
+                        if "no_processes" in ps_output:
+                            if not no_processes_detected:
+                                logger.warning(f"No tech support processes running on {node['name']} (retry {retry_number})")
+                                no_processes_detected = True
+                        else:
                             logger.debug(f"Tech support processes found running on {node['name']}")
+                            no_processes_detected = False
                 
                 # Get the current date part for identifying today's tech supports
                 cmd_date = self.node_manager.build_ssh_command(node['ip'], "date '+%Y-%m-%d'")
@@ -1207,18 +1285,23 @@ class TechSupportManager:
                     break
                     
                 # If we're still looking, print status for the user
-                print(f"Tech support not ready yet on {node['name']} (attempt {retry+1}/{max_retries}), waiting {retry_interval} seconds...")
+                if retry_number < MAX_RETRIES:
+                    print(f"Tech support not ready yet on {node['name']}, waiting {retry_interval} seconds before next check...")
             
             # If we couldn't find a tech support with timestamp AFTER our command time,
             # don't fall back to an older one
             if not found_tech_support:
-                logger.error(f"No new tech support found on {node['name']} after {max_retries} retries")
-                print(f"{FAIL} No new tech support with timestamp after {pre_command_timestamp} found on {node['name']}.")
+                logger.error(f"No new tech support found on {node['name']} after {MAX_RETRIES} retries ({MAX_RETRIES * retry_interval // 60} minutes)")
+                print(f"{FAIL} Tech support generation timed out on {node['name']} after {MAX_RETRIES} attempts.")
+                print(f"No new tech support with timestamp after {pre_command_timestamp} was found.")
+                print(f"")
+                if no_processes_detected:
+                    print(f"⚠️  WARNING: No tech support processes were detected running on the node.")
                 print(f"This usually indicates one of the following:")
                 print(f"  1. The tech support command failed due to invalid arguments")
                 print(f"  2. The tech support command is not supported on this ND version")
                 print(f"  3. There is insufficient disk space to generate the tech support")
-                print(f"  4. The tech support process is still running but taking longer than expected")
+                print(f"  4. The tech support process is still running but taking longer than {MAX_RETRIES * retry_interval // 60} minutes")
                 print(f"")
                 print(f"To debug this issue:")
                 print(f"  1. SSH to {node['name']} and manually run: {techsupport_cmd}")
@@ -2389,7 +2472,7 @@ class MultipleFileManager:
             return self.files[index]
         return None
     
-def process_all_nodes(node_manager, tech_choice, debug_mode=False):
+def process_all_nodes(node_manager, tech_choice, debug_mode=False, skipped_nodes_info=None):
     """Process all nodes with validation script using optimal resource-based concurrency"""
     # Record process start time
     process_start_time = time.time()
@@ -2402,6 +2485,10 @@ def process_all_nodes(node_manager, tech_choice, debug_mode=False):
     nodes = node_manager.nodes
     tech_manager = TechSupportManager(node_manager)
     script_manager = WorkerScriptManager(node_manager)
+    
+    # Initialize skipped_nodes_info if not provided
+    if skipped_nodes_info is None:
+        skipped_nodes_info = {'disk_space_issues': []}
     
     # Initialize result collections
     all_results = {}
@@ -2422,26 +2509,32 @@ def process_all_nodes(node_manager, tech_choice, debug_mode=False):
     if tech_choice == "1":
         # Generate new tech supports IN PARALLEL for all nodes
         print("Generating tech supports for all nodes in parallel. This may take several minutes...")
+        print("(Press Ctrl+C to abort if needed)")
         
         # Use ThreadPoolExecutor to generate tech supports in parallel
-        with ThreadPoolExecutor(max_workers=max_concurrent_nodes) as executor:
-            # Create a future for each node
-            future_to_node = {executor.submit(tech_manager.generate_techsupport, node): node for node in nodes}
-            
-            # Process results as they complete
-            for future in as_completed(future_to_node):
-                node = future_to_node[future]
-                node_name = node["name"]
-                try:
-                    tech_support_path = future.result()
-                    if not tech_support_path:
-                        print(f"{FAIL} Failed to generate tech support on {node_name}")
-                        continue
-                    tech_support_paths[node_name] = tech_support_path
-                    print(f"Generated tech support on {node_name}: {os.path.basename(tech_support_path)}")
-                except Exception as exc:
-                    logger.exception(f"Error generating tech support for {node_name}: {exc}")
-                    print(f"{FAIL} Error generating tech support for {node_name}: {str(exc)}")
+        try:
+            with ThreadPoolExecutor(max_workers=max_concurrent_nodes) as executor:
+                # Create a future for each node
+                future_to_node = {executor.submit(tech_manager.generate_techsupport, node): node for node in nodes}
+                
+                # Process results as they complete
+                for future in as_completed(future_to_node):
+                    node = future_to_node[future]
+                    node_name = node["name"]
+                    try:
+                        tech_support_path = future.result()
+                        if not tech_support_path:
+                            print(f"{FAIL} Failed to generate tech support on {node_name}")
+                            continue
+                        tech_support_paths[node_name] = tech_support_path
+                        print(f"Generated tech support on {node_name}: {os.path.basename(tech_support_path)}")
+                    except Exception as exc:
+                        logger.exception(f"Error generating tech support for {node_name}: {exc}")
+                        print(f"{FAIL} Error generating tech support for {node_name}: {str(exc)}")
+        except KeyboardInterrupt:
+            print("\n\n🛑 Tech support generation interrupted by user. Shutting down...")
+            logger.warning("Tech support generation interrupted by user (Ctrl+C)")
+            sys.exit(0)
     else:
         # Fetch tech support listings for all nodes in parallel first
         print("Checking for tech support files on all nodes...")
@@ -2712,7 +2805,7 @@ def process_all_nodes(node_manager, tech_choice, debug_mode=False):
     
     # Generate the final report
     if all_results:
-        generate_report(all_results, None, overall_status, timing_info)
+        generate_report(all_results, None, overall_status, timing_info, skipped_nodes_info)
     else:
         print(f"{FAIL} No results were collected from any nodes.")
     
@@ -2734,7 +2827,7 @@ def print_section(title):
     print(f"  {title}")
     print(f"{'='*80}")
 
-def generate_report(all_results, version, overall_status, timing_info=None):
+def generate_report(all_results, version, overall_status, timing_info=None, skipped_nodes_info=None):
     """Generate a final report based on aggregated results with clear check-by-check output"""
     print_section("Pre-upgrade Validation Report")
     
@@ -2787,6 +2880,47 @@ def generate_report(all_results, version, overall_status, timing_info=None):
         timestamp = f"Report generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         print(timestamp, end="")
         summary_file.write(timestamp)
+        
+        # Add skipped nodes section if there were any
+        if skipped_nodes_info and skipped_nodes_info.get('disk_space_issues'):
+            disk_space_issues = skipped_nodes_info['disk_space_issues']
+            skipped_header = f"⚠️  NODES SKIPPED DUE TO DISK SPACE ISSUES\n"
+            skipped_separator = "="*50 + "\n\n"
+            
+            print(skipped_header, end="")
+            print(skipped_separator, end="")
+            summary_file.write(skipped_header)
+            summary_file.write(skipped_separator)
+            
+            for issue in disk_space_issues:
+                node = issue['node']
+                directories = issue['directories']
+                
+                node_info = f"Node: {node['name']} ({node['ip']})\n"
+                print(node_info, end="")
+                summary_file.write(node_info)
+                
+                if directories:
+                    dirs_header = "Directories over 80% usage:\n"
+                    print(dirs_header, end="")
+                    summary_file.write(dirs_header)
+                    
+                    for mount_point, usage_pct in directories:
+                        dir_info = f"  • {mount_point}: {usage_pct:.0f}% full\n"
+                        print(dir_info, end="")
+                        summary_file.write(dir_info)
+                else:
+                    error_info = f"  • {issue['error']}\n"
+                    print(error_info, end="")
+                    summary_file.write(error_info)
+                
+                recommendation = f"Recommendation: Contact TAC to help clear these directories before\n"
+                recommendation += f"                rerunning the script against {node['name']}\n\n"
+                print(recommendation, end="")
+                summary_file.write(recommendation)
+            
+            print("")  # Add blank line
+            summary_file.write("\n")
         
         # Define check order and display formatting
         PASS = "\033[1;32mPASS\033[0m"
@@ -3048,6 +3182,16 @@ def main():
     global logger
     logger = setup_logging()
 
+    # Set up Ctrl+C handler for graceful shutdown
+    def signal_handler(sig, frame):
+        print("\n\n🛑 Interrupt received (Ctrl+C). Shutting down gracefully...")
+        logger.warning("User interrupt (Ctrl+C) received. Initiating shutdown...")
+        print("Please wait while we clean up active operations...")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    logger.info("Signal handler registered for graceful shutdown")
+
     # Check environment dependencies first
     env_ready, missing_deps, install_instructions = check_environment()
     
@@ -3156,6 +3300,80 @@ def main():
             print(f"\t{node['name']} ({node['ip']})")
         print("---------------------------------------")
         
+        # Check disk space on all nodes before proceeding
+        print("\nChecking disk space on all nodes...")
+        nodes_with_space_issues = []
+        nodes_healthy = []
+        
+        for node in nodes:
+            # Skip inactive nodes
+            if node.get('status', '').lower() != 'active':
+                logger.info(f"Skipping disk space check for inactive node {node['name']}")
+                continue
+            
+            print(f"Checking {node['name']}...", end=" ")
+            is_healthy, over_threshold_dirs, error_msg = node_manager.check_node_disk_space(node)
+            
+            if is_healthy:
+                print(f"{PASS}")
+                nodes_healthy.append(node['name'])
+            else:
+                print(f"{FAIL}")
+                nodes_with_space_issues.append({
+                    'node': node,
+                    'directories': over_threshold_dirs,
+                    'error': error_msg
+                })
+        
+        # If any nodes have space issues, report them and exclude from validation
+        if nodes_with_space_issues:
+            print(f"\n{FAIL} Disk Space Issues Detected")
+            print("="*80)
+            print("The following nodes have directories with usage >= 80%:\n")
+            
+            for issue in nodes_with_space_issues:
+                node = issue['node']
+                directories = issue['directories']
+                
+                print(f"{node['name']} ({node['ip']}):")
+                if directories:
+                    for mount_point, usage_pct in directories:
+                        print(f"  • {mount_point}: {usage_pct:.0f}% full")
+                else:
+                    print(f"  • {issue['error']}")
+                
+                print(f"  {WARNING} Script will not run on {node['name']}")
+                print(f"  Recommendation: Contact TAC to help clear these directories before")
+                print(f"                  rerunning the script against {node['name']}\n")
+            
+            # Filter out nodes with space issues from the nodes list
+            failed_node_names = [issue['node']['name'] for issue in nodes_with_space_issues]
+            nodes = [node for node in nodes if node['name'] not in failed_node_names]
+            
+            if not nodes:
+                print(f"\n{FAIL} All nodes have disk space issues. Cannot proceed with validation.")
+                print("Please resolve the disk space issues and rerun the script.\n")
+                return 1
+            
+            print(f"{WARNING} Proceeding with validation on {len(nodes)} node(s) that passed disk space check:")
+            for node in nodes:
+                print(f"  - {node['name']} ({node['ip']})")
+            
+            # Ask user for confirmation
+            while True:
+                choice = input(f"\nDo you want to continue with validation on {len(nodes)} node(s)? (y/n): ").lower().strip()
+                if choice in ['y', 'yes']:
+                    print("Proceeding with nodes that passed disk space check...")
+                    # Update node_manager to use only healthy nodes
+                    node_manager.nodes = nodes
+                    break
+                elif choice in ['n', 'no']:
+                    print("Validation cancelled by user.")
+                    return 0
+                else:
+                    print("Please enter 'y' for yes or 'n' for no.")
+            print()
+        
         # Check for inactive nodes and get user confirmation
         inactive_nodes = [node for node in nodes if node.get('status', '').lower() != 'active']
         active_nodes = [node for node in nodes if node.get('status', '').lower() == 'active']
@@ -3193,7 +3411,8 @@ def main():
                 else:
                     print("Please enter 'y' for yes or 'n' for no.")
         else:
-            print(f"\n{PASS} All {len(nodes)} nodes are active and ready for validation.")
+            print(f"\n{PASS} All {len(nodes)} nodes are active and have healthy disk space (<80% usage).")
+            print(f"{PASS} All nodes are ready for validation.")
             active_nodes = nodes
         
         # Run diagnostic mode if requested
@@ -3225,9 +3444,14 @@ def main():
         
         tech_choice = input("\nEnter your choice (1/2): ")
         
+        # Store skipped nodes information for final report
+        skipped_nodes_info = {
+            'disk_space_issues': nodes_with_space_issues if nodes_with_space_issues else []
+        }
+        
         # Process all nodes - resource-optimized
         # Save the results to ensure we can access debug_data after the report is generated
-        results = process_all_nodes(node_manager, tech_choice, args.debug)
+        results = process_all_nodes(node_manager, tech_choice, args.debug, skipped_nodes_info)
         
         # Display debug mode warning at the very end, after the report
         if args.debug and results and "_debug_info" in results:
