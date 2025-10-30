@@ -31,11 +31,12 @@ The script can be run from any Linux server with the required dependencies. If A
 | 7 | Disk space | Verify all directories are under 70% utilization | |
 | 8 | Pod status | Verify all Pods and Services are in a healthy state | |
 | 9 | System health | Verify all nodes are healthy using 'acs health' command | |
-| 10 | Certificate check | Verify no certificates have non-alphanumeric characters | [Link](https://bst.cisco.com/bugsearch/bug/CSCwm35992) |
-| 11 | ISO check | Verify multiple ISOs aren't found in boothook | [Link](https://bst.cisco.com/bugsearch/bug/CSCwn94394) |
-| 12 | Lvm Pvs check | Verify no empty ElasticSearch PVs are found | [Link](https://bst.cisco.com/bugsearch/bug/CSCwe91228) |
-| 13 | atom0 NVME check | Verify no NVME drive hardware failures are present in Physical node setups | |
-| 14 | atom0 vg check | Verify there is more than 50% free space in atom0 virtual group | [Link](https://bst.cisco.com/bugsearch/bug/CSCwr43515) |
+| 10 | NXOS Discovery Service | Verify cisco-ndfc k8 App is not stuck in Disabling | [Link](https://bst.cisco.com/bugsearch/bug/CSCwm97680) |
+| 11 | Certificate check | Verify no certificates have non-alphanumeric characters | [Link](https://bst.cisco.com/bugsearch/bug/CSCwm35992) |
+| 12 | ISO check | Verify multiple ISOs aren't found in boothook | [Link](https://bst.cisco.com/bugsearch/bug/CSCwn94394) |
+| 13 | Lvm Pvs check | Verify no empty ElasticSearch PVs are found | [Link](https://bst.cisco.com/bugsearch/bug/CSCwe91228) |
+| 14 | atom0 NVME check | Verify no NVME drive hardware failures are present in Physical node setups | |
+| 15 | atom0 vg check | Verify there is more than 50% free space in atom0 virtual group | [Link](https://bst.cisco.com/bugsearch/bug/CSCwr43515) |
 
 ## Dependencies and Installation
 

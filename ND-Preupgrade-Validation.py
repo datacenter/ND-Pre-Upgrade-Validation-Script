@@ -2943,6 +2943,7 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
             "disk_space", 
             "pod_status", 
             "system_health",
+            "nxos_discovery_service",
             "certificate_check",
             "iso_check",
             "lvm_pvs_check",

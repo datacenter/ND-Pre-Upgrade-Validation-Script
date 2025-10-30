@@ -67,7 +67,8 @@ results = {
         "lvm_pvs_check": {"status": "PASS", "details": []},
         "persistent_ip_check": {"status": "PASS", "details": []},  # Persistent IP configuration check
         "atom0_nvme_check": {"status": "PASS", "details": []},  # NVME drive health check for physical nodes
-        "atom0_vg_check": {"status": "PASS", "details": []}  # atom0 virtual group space check
+        "atom0_vg_check": {"status": "PASS", "details": []},  # atom0 virtual group space check
+        "nxos_discovery_service": {"status": "PASS", "details": []}  # NXOS Discovery Service check CSCwm97680
     }
 }
 
@@ -1482,6 +1483,179 @@ def check_system_health(tech_file=None):
         # Add these fields at the top level of the check results, not in the details array
         results["checks"]["system_health"]["explanation"] = "The system is not in a healthy state. Services might be failing or resource usage might be high."
         results["checks"]["system_health"]["recommendation"] = "Contact Cisco TAC for assistance in remediation of system health."
+    
+    return True
+
+def check_nxos_discovery_service(tech_file):
+    """
+    Check NXOS Discovery Service status for ndfc-fabric-ndi
+    
+    This check verifies that the cisco-ndfc k8 app is not stuck in Disable/Processing state,
+    which can cause upgrade failures in ND 3.1.1 and later.
+    
+    Reference: CSCwm97680
+    """
+    print_section("Checking NXOS Discovery Service on {0}".format(NODE_NAME))
+    update_status("running", "Checking NXOS Discovery Service", 98)
+    
+    node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
+    
+    # Use file cache for faster file discovery
+    cache = get_file_cache()
+    
+    # Step 1: Check if this is an ndfc-fabric-ndi deployment by looking at k8-releases.yaml
+    k8_releases_files = cache.find_files("k8-diag/kubectl/k8-releases.yaml")
+    
+    if not k8_releases_files:
+        print("[WARNING] k8-releases.yaml file not found in tech support")
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    k8_releases_file = k8_releases_files[0]
+    print("Found k8-releases.yaml: {0}".format(k8_releases_file))
+    
+    # Read the file and check for desiredDeploymentMode
+    deployment_mode = None
+    try:
+        with open(k8_releases_file, 'r') as f:
+            for line in f:
+                if 'desiredDeploymentMode' in line:
+                    # Extract the value after the colon
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        deployment_mode = parts[1].strip()
+                        print("Found desiredDeploymentMode: {0}".format(deployment_mode))
+                        break
+    except Exception as e:
+        print("[WARNING] Error reading k8-releases.yaml: {0}".format(str(e)))
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    # Check if we found deployment mode
+    if not deployment_mode:
+        print("[WARNING] desiredDeploymentMode not found in k8-releases.yaml")
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    # If not ndfc-fabric-ndi deployment, check passes
+    if deployment_mode.lower() != "ndfc-fabric-ndi":
+        print("[PASS] Deployment mode is '{0}' (not ndfc-fabric-ndi), check not applicable".format(deployment_mode))
+        results["checks"]["nxos_discovery_service"]["status"] = "PASS"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Deployment Mode is not ndfc-fabric-ndi"
+        ]
+        return True
+    
+    # Step 2: This is an ndfc-fabric-ndi deployment, check the k8-app file
+    print("This is an ndfc-fabric-ndi deployment, checking cisco-ndfc app status...")
+    k8_app_files = cache.find_files("k8-diag/kubectl/k8-app")
+    
+    if not k8_app_files:
+        print("[WARNING] k8-app file not found in tech support")
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    k8_app_file = k8_app_files[0]
+    print("Found k8-app: {0}".format(k8_app_file))
+    
+    # Read k8-app file and look for cisco-ndfc line
+    cisco_ndfc_found = False
+    admin_state = None
+    operstate = None
+    
+    try:
+        with open(k8_app_file, 'r') as f:
+            for line in f:
+                line_stripped = line.strip()
+                
+                # Skip header lines and empty lines
+                if not line_stripped or line_stripped.startswith("NAME"):
+                    continue
+                
+                # Check for error output (unexpected output case)
+                if "command not found" in line_stripped or "Error" in line_stripped:
+                    print("[WARNING] Unexpected output in k8-app file: {0}".format(line_stripped))
+                    results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+                    results["checks"]["nxos_discovery_service"]["details"] = [
+                        "Unable to verify NXOS Discovery Service status"
+                    ]
+                    results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+                    results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+                    return False
+                
+                # Look for lines containing cisco-ndfc (case insensitive)
+                if 'cisco-ndfc' in line_stripped.lower():
+                    cisco_ndfc_found = True
+                    print("Found cisco-ndfc line: {0}".format(line_stripped))
+                    
+                    # Parse the line - format: NAME ADMIN RUNNING INSTALLSTATE OPERSTATE
+                    parts = line_stripped.split()
+                    if len(parts) >= 5:
+                        admin_state = parts[1]
+                        operstate = parts[4]
+                        print("Admin State: {0}, OperState: {1}".format(admin_state, operstate))
+                        
+                        # Check if it's in Disable/Processing state (case insensitive)
+                        if admin_state.lower() == 'disable' and operstate.lower() == 'processing':
+                            print("[FAIL] cisco-ndfc is in Disable/Processing state")
+                            results["checks"]["nxos_discovery_service"]["status"] = "FAIL"
+                            results["checks"]["nxos_discovery_service"]["details"] = [
+                                "NXOS Discovery Service in Disable/Processing state"
+                            ]
+                            results["checks"]["nxos_discovery_service"]["explanation"] = "During upgrade to 3.1.1 and later, NXOS Discovery Service can enter problematic \n  state under certain conditions and result in subsequent upgrade failures."
+                            results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for assistance in remediation."
+                            results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+                            return False
+                    else:
+                        print("[WARNING] Unexpected format in k8-app line for cisco-ndfc")
+    
+    except Exception as e:
+        print("[WARNING] Error reading k8-app file: {0}".format(str(e)))
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    # If we didn't find cisco-ndfc at all in an ndfc-fabric-ndi deployment, that's unexpected
+    if not cisco_ndfc_found:
+        print("[WARNING] cisco-ndfc app not found in k8-app file for NDI deployment")
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    # If we got here, cisco-ndfc was found and is in a good state (Enable/Enabled)
+    print("[PASS] cisco-ndfc is in a healthy state (Admin: {0}, OperState: {1})".format(admin_state, operstate))
+    results["checks"]["nxos_discovery_service"]["status"] = "PASS"
+    results["checks"]["nxos_discovery_service"]["details"] = [
+        "cisco-ndfc k8 App in Enabled state"
+    ]
     
     return True
 
@@ -3318,6 +3492,13 @@ def main():
                 print("[ERROR] System health check failed: {0}".format(str(e)))
                 results["checks"]["system_health"]["status"] = "FAIL"
                 results["checks"]["system_health"]["details"] = ["Check failed: {0}".format(str(e))]
+                
+            try:
+                check_nxos_discovery_service(dest_path)
+            except Exception as e:
+                print("[ERROR] NXOS Discovery Service check failed: {0}".format(str(e)))
+                results["checks"]["nxos_discovery_service"]["status"] = "FAIL"
+                results["checks"]["nxos_discovery_service"]["details"] = ["Check failed: {0}".format(str(e))]
                 
             try:
                 check_CA_CSCwm35992(dest_path)
