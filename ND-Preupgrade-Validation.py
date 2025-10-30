@@ -1414,7 +1414,7 @@ class WorkerScriptManager:
                 success, stdout, stderr = execute_ssh_with_retry(scp_cmd, "transfer script")
                 
                 if not success:
-                    logger.warning(f"SCP transfer failed for {node['name']}: {stderr}")
+                    logger.debug(f"SCP transfer failed for {node['name']}: {stderr}")
                     raise Exception(f"File transfer failed: {stderr}")
                 
                 # Step 3: Set permissions and verify in single command
@@ -1432,7 +1432,7 @@ class WorkerScriptManager:
                     raise Exception(f"Deployment verification failed: {stderr}")
                     
         except Exception as e:
-            logger.exception(f"Error in optimized deployment for node {node['name']}: {str(e)}")
+            logger.debug(f"Error in optimized deployment for node {node['name']}: {str(e)}")
             # Fall back to original method
             return self._deploy_worker_script_fallback(node, worker_script_content, stagger_delay)
     
@@ -1508,10 +1508,10 @@ class WorkerScriptManager:
                 
                 if not success:
                     error = stderr
-                    logger.error(f"Failed to transfer script to node {node['name']} using SCP: {error}")
+                    logger.debug(f"Failed to transfer script to node {node['name']} using SCP: {error}")
                     
                     # Fall back to alternative method using cat
-                    logger.info(f"Falling back to cat method for {node['name']}")
+                    logger.debug(f"Falling back to cat method for {node['name']}")
                     time.sleep(1)  # Delay before fallback
                     
                     # Re-open the temp file for reading

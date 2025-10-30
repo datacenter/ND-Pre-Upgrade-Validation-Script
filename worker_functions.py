@@ -1488,7 +1488,7 @@ def check_system_health(tech_file=None):
 
 def check_nxos_discovery_service(tech_file):
     """
-    Check NXOS Discovery Service status for ndfc-fabric-ndi
+    Check NXOS Discovery Service status for ndfc-fabric-ndi deployments
     
     This check verifies that the cisco-ndfc k8 app is not stuck in Disable/Processing state,
     which can cause upgrade failures in ND 3.1.1 and later.
@@ -1503,7 +1503,65 @@ def check_nxos_discovery_service(tech_file):
     # Use file cache for faster file discovery
     cache = get_file_cache()
     
-    # Step 1: Check if this is an ndfc-fabric-ndi deployment by looking at k8-releases.yaml
+    # Step 1: Check ND version - this check only applies to ND 3.1.1 and later
+    version_files = cache.find_files("acs-checks/acs_version")
+    if not version_files:
+        print("[WARNING] acs_version file not found")
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    version_file = version_files[0]
+    nd_version = None
+    try:
+        with open(version_file, 'r') as f:
+            version_line = f.read().strip()
+            # Extract version (e.g., "Nexus Dashboard 3.1.1g" -> "3.1.1g")
+            if "Nexus Dashboard" in version_line:
+                nd_version = version_line.split("Nexus Dashboard")[1].strip()
+            else:
+                nd_version = version_line
+            print("ND Version: {0}".format(nd_version))
+    except Exception as e:
+        print("[WARNING] Error reading version file: {0}".format(str(e)))
+        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
+        results["checks"]["nxos_discovery_service"]["details"] = [
+            "Unable to verify NXOS Discovery Service status"
+        ]
+        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
+        return False
+    
+    # Parse version to check if < 3.1.1
+    if nd_version:
+        try:
+            version_parts = nd_version.split('.')
+            if len(version_parts) >= 3:
+                major = int(version_parts[0])
+                minor = int(version_parts[1])
+                # Extract patch number (e.g., "1g" -> 1)
+                patch_str = version_parts[2]
+                patch = int(''.join(filter(str.isdigit, patch_str))) if patch_str else 0
+                
+                # Check if version < 3.1.1
+                if major < 3 or (major == 3 and minor < 1) or (major == 3 and minor == 1 and patch < 1):
+                    print("[PASS] ND version {0} < 3.1.1 - NXOS Discovery Service check not applicable".format(nd_version))
+                    results["checks"]["nxos_discovery_service"]["status"] = "PASS"
+                    results["checks"]["nxos_discovery_service"]["details"] = [
+                        "Version below 3.1.1, check not applicable"
+                    ]
+                    return True
+                else:
+                    print("ND version {0} >= 3.1.1 - proceeding with NXOS Discovery Service check".format(nd_version))
+        except (ValueError, IndexError) as e:
+            print("[WARNING] Could not parse version for version check: {0}".format(str(e)))
+            # If we can't parse the version, continue with the check to be safe
+    
+    # Step 2: Check if this is an ndfc-fabric-ndi deployment by looking at k8-releases.yaml
     k8_releases_files = cache.find_files("k8-diag/kubectl/k8-releases.yaml")
     
     if not k8_releases_files:
