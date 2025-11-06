@@ -26,17 +26,18 @@ The script can be run from any Linux server with the required dependencies. If A
 | 2 | Version | Verify all cluster nodes are running the same version | |
 | 3 | Node status | Verify all cluster nodes are in an Active state | |
 | 4 | Ping check | Verify node can ping all Mgmt and Data IPs in the cluster | |
-| 5 | Subnet check | Verify Mgmt and Data interfaces are on different subnets | [Link](https://www.cisco.com/c/en/us/td/docs/dcn/nd/3x/deployment/cisco-nexus-dashboard-and-services-deployment-guide-311/nd-prerequisites-platform-31x.html#concept_fdf_fxg_4mb) |
-| 6 | Persistent IP check | Verify at lest 5 Persistent IP address are configured in data-external-services | [Link](https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/cisco-nexus-dashboard-deployment-guide-41x/nd-prerequisites-41x.html#concept_zkj_3hj_cgc) |
+| 5 | Subnet check | Verify Mgmt and Data interfaces are on different subnets | [Documentation](https://www.cisco.com/c/en/us/td/docs/dcn/nd/3x/deployment/cisco-nexus-dashboard-and-services-deployment-guide-311/nd-prerequisites-platform-31x.html#concept_fdf_fxg_4mb) |
+| 6 | Persistent IP check | Verify at lest 5 Persistent IP address are configured in data-external-services | [Documentation](https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/cisco-nexus-dashboard-deployment-guide-41x/nd-prerequisites-41x.html#concept_zkj_3hj_cgc) |
 | 7 | Disk space | Verify all directories are under 70% utilization | |
 | 8 | Pod status | Verify all Pods and Services are in a healthy state | |
 | 9 | System health | Verify all nodes are healthy using 'acs health' command | |
-| 10 | NXOS Discovery Service | Verify cisco-ndfc k8 App is not stuck in Disabling | [Link](https://bst.cisco.com/bugsearch/bug/CSCwm97680) |
-| 11 | Certificate check | Verify no certificates have non-alphanumeric characters | [Link](https://bst.cisco.com/bugsearch/bug/CSCwm35992) |
-| 12 | ISO check | Verify multiple ISOs aren't found in boothook | [Link](https://bst.cisco.com/bugsearch/bug/CSCwn94394) |
-| 13 | Lvm Pvs check | Verify no empty ElasticSearch PVs are found | [Link](https://bst.cisco.com/bugsearch/bug/CSCwe91228) |
-| 14 | atom0 NVME check | Verify no NVME drive hardware failures are present in Physical node setups | |
-| 15 | atom0 vg check | Verify there is more than 50% free space in atom0 virtual group | [Link](https://bst.cisco.com/bugsearch/bug/CSCwr43515) |
+| 10 | NXOS Discovery Service | Verify cisco-ndfc k8 App is not stuck in Disabling | [CSCwm97680](https://bst.cisco.com/bugsearch/bug/CSCwm97680) |
+| 11 | Backup failure check | Verify latest backup is not in Failed or InProgress state | [CSCwq57968](https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwq57968), [CSCwm96512](https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwm96512) |
+| 12 | Certificate check | Verify no certificates have non-alphanumeric characters | [CSCwm35992](https://bst.cisco.com/bugsearch/bug/CSCwm35992) |
+| 13 | ISO check | Verify multiple ISOs aren't found in boothook | [CSCwn94394](https://bst.cisco.com/bugsearch/bug/CSCwn94394) |
+| 14 | Lvm Pvs check | Verify no empty ElasticSearch PVs are found | [CSCwe91228](https://bst.cisco.com/bugsearch/bug/CSCwe91228) |
+| 15 | atom0 NVME check | Verify no NVME drive hardware failures are present in Physical node setups | |
+| 16 | atom0 vg check | Verify there is more than 50% free space in atom0 virtual group | [CSCwr43515](https://bst.cisco.com/bugsearch/bug/CSCwr43515) |
 
 ## Dependencies and Installation
 
@@ -85,9 +86,9 @@ Place the main script `ND-Preupgrade-Validation.py` and the worker script `worke
 
 ### Example Run:
 ```
-[root@localhost pre]# python3 ND-Preupgrade-Validation.py
+[root@localhost preupgrade]# python3 ND-Preupgrade-Validation.py
 Nexus Dashboard Pre-upgrade Validation Script (Distributed Version)
-Running validation checks on 2025-10-20 20:19:12
+Running validation checks on 2025-11-05 20:18:18
 Enter Nexus Dashboard IP address: 14.2.29.130
 Enter password for rescue-user:
 
@@ -102,7 +103,13 @@ Found 3 Nexus Dashboard nodes
         ND3 (14.2.29.132)
 ---------------------------------------
 
-PASS All 3 nodes are active and ready for validation.
+Checking disk space on all nodes...
+Checking ND1... PASS
+Checking ND2... PASS
+Checking ND3... PASS
+
+PASS All 3 nodes are active and have healthy disk space (<80% usage).
+PASS All nodes are ready for validation.
 
 System resource assessment:
   CPU cores: 40
@@ -119,34 +126,32 @@ Enter your choice (1/2): 1
 ================================================================================
   Tech Support Selection/Generation
 ================================================================================
-Generating tech supports for all nodes in parallel. This may take several minutes...
-Generating tech support on ND1...
+Generating tech supports for all nodes in parallel.
 Starting tech support collection on ND1. This may take several minutes...
-Tech support collection started successfully on ND1
-Waiting for tech support generation to complete on ND1. This may take several minutes...
-Generating tech support on ND3...
-Starting tech support collection on ND3. This may take several minutes...
-Generating tech support on ND2...
 Starting tech support collection on ND2. This may take several minutes...
+Starting tech support collection on ND3. This may take several minutes...
+Tech support collection started successfully on ND1
 Tech support collection started successfully on ND2
-Waiting for tech support generation to complete on ND2. This may take several minutes...
 Tech support collection started successfully on ND3
-Waiting for tech support generation to complete on ND3. This may take several minutes...
-Verifying tech support file stability for ND1...
-Verifying tech support file stability for ND2...
-Verifying tech support file stability for ND3...
-Tech support not ready yet on ND1 (attempt 1/30), waiting 30 seconds...
-Tech support not ready yet on ND2 (attempt 1/30), waiting 30 seconds...
-Tech support not ready yet on ND3 (attempt 1/30), waiting 30 seconds...
-Verifying tech support file stability for ND1...
-Verifying tech support file stability for ND2...
-Verifying tech support file stability for ND3...
-Tech support generated on ND1: /techsupport/2025-10-21T00-45-25Z-system-ts-ND1.tgz
-Tech support generated on ND2: /techsupport/2025-10-21T00-45-26Z-system-ts-ND2.tgz
-Tech support generated on ND3: /techsupport/2025-10-21T00-45-24Z-system-ts-ND3.tgz
-Generated tech support on ND3: 2025-10-21T00-45-24Z-system-ts-ND3.tgz
-Generated tech support on ND1: 2025-10-21T00-45-25Z-system-ts-ND1.tgz
-Generated tech support on ND2: 2025-10-21T00-45-26Z-system-ts-ND2.tgz
+Found tech support file being generated on ND2, monitoring for completion...
+Found tech support file being generated on ND1, monitoring for completion...
+Found tech support file being generated on ND3, monitoring for completion...
+Tech support still generating on ND2: 1.70 GB (+1192.2 MB)...
+Tech support still generating on ND1: 1.46 GB (+975.7 MB)...
+Tech support still generating on ND3: 0.85 GB (+271.7 MB)...
+Tech support still generating on ND2: 1.71 GB (+6.5 MB)...
+File size stable on ND1, performing verification checks...
+File size stable on ND3, performing verification checks...
+Tech support generation confirmed complete on ND3
+Tech support generation confirmed complete on ND1
+PASS Tech support generated on ND3: /techsupport/2025-11-06T01-45-34Z-system-ts-ND3.tgz
+PASS Tech support generated on ND1: /techsupport/2025-11-06T01-45-36Z-system-ts-ND1.tgz
+Generated tech support on ND3: 2025-11-06T01-45-34Z-system-ts-ND3.tgz
+Generated tech support on ND1: 2025-11-06T01-45-36Z-system-ts-ND1.tgz
+File size stable on ND2, performing verification checks...
+Tech support generation confirmed complete on ND2
+PASS Tech support generated on ND2: /techsupport/2025-11-06T01-45-35Z-system-ts-ND2.tgz
+Generated tech support on ND2: 2025-11-06T01-45-35Z-system-ts-ND2.tgz
 
 ================================================================================
   Pre-Flight /tmp Space Validation
@@ -155,11 +160,11 @@ Checking /tmp disk space on all nodes before extraction...
 This validation ensures sufficient space for tech support extraction (70% threshold).
 
 Checking space on ND1... PASS
-  Tech support: 1.45 GB | Current: 18.0% | Projected: 45.2%
+  Tech support: 1.46 GB | Current: 18.0% | Projected: 45.3%
 Checking space on ND2... PASS
-  Tech support: 1.66 GB | Current: 0.0% | Projected: 31.1%
+  Tech support: 1.71 GB | Current: 0.0% | Projected: 32.0%
 Checking space on ND3... PASS
-  Tech support: 0.76 GB | Current: 7.0% | Projected: 21.2%
+  Tech support: 0.85 GB | Current: 7.0% | Projected: 22.9%
 
 PASS All nodes passed /tmp space validation!
 Proceeding with worker script deployment...
@@ -203,132 +208,148 @@ PASS Cleaned up temporary files on ND3
 ================================================================================
   Pre-upgrade Validation Report
 ================================================================================
-Total validation time: 4 min 26 sec
+Total validation time: 3 min 37 sec
 
 
-Report generated on: 2025-10-20 20:23:57
+Report generated on: 2025-11-05 20:22:04
 
-[Check  1/14] Techsupport...                                                      PASS
+[Check  1/16] Techsupport...                                                      PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      Tech support generated and extracted successfully
-  ND2        PASS      Tech support generated and extracted successfully
-  ND3        PASS      Tech support generated and extracted successfully
+  ND1        PASS     Tech support generated and extracted successfully
+  ND2        PASS     Tech support generated and extracted successfully
+  ND3        PASS     Tech support generated and extracted successfully
 
-[Check  2/14] Version Check...                                                    PASS
+[Check  2/16] Version Check...                                                    PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      All cluster nodes are on the same version: 3.2.2f
-  ND2        PASS      All cluster nodes are on the same version: 3.2.2f
-  ND3        PASS      All cluster nodes are on the same version: 3.2.2f
+  ND1        PASS     All cluster nodes are on the same version: 3.2.2f
+  ND2        PASS     All cluster nodes are on the same version: 3.2.2f
+  ND3        PASS     All cluster nodes are on the same version: 3.2.2f
 
-[Check  3/14] Node Status...                                                      PASS
+[Check  3/16] Node Status...                                                      PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      All nodes in the cluster are in Active state
-  ND2        PASS      All nodes in the cluster are in Active state
-  ND3        PASS      All nodes in the cluster are in Active state
+  ND1        PASS     All nodes in the cluster are in Active state
+  ND2        PASS     All nodes in the cluster are in Active state
+  ND3        PASS     All nodes in the cluster are in Active state
 
-[Check  4/14] Ping Check...                                                       PASS
+[Check  4/16] Ping Check...                                                       PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      Node can ping all mgmt and data ips in the cluster
-  ND2        PASS      Node can ping all mgmt and data ips in the cluster
-  ND3        PASS      Node can ping all mgmt and data ips in the cluster
+  ND1        PASS     Node can ping all mgmt and data ips in the cluster
+  ND2        PASS     Node can ping all mgmt and data ips in the cluster
+  ND3        PASS     Node can ping all mgmt and data ips in the cluster
 
-[Check  5/14] Subnet Check...                                                     PASS
+[Check  5/16] Subnet Check...                                                     PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      Mgmt and Data interfaces are in different subnets
-  ND2        PASS      Mgmt and Data interfaces are in different subnets
-  ND3        PASS      Mgmt and Data interfaces are in different subnets
+  ND1        PASS     Mgmt and Data interfaces are in different subnets
+  ND2        PASS     Mgmt and Data interfaces are in different subnets
+  ND3        PASS     Mgmt and Data interfaces are in different subnets
 
-[Check  6/14] Persistent Ip Check...                                              PASS
+[Check  6/16] Persistent Ip Check...                                              PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      Found 10 persistent IP addresses (meets minimum requirement of 5)
-  ND2        PASS      Found 10 persistent IP addresses (meets minimum requirement of 5)
-  ND3        PASS      Found 10 persistent IP addresses (meets minimum requirement of 5)
+  ND1        PASS     Found 10 persistent IP addresses (meets minimum requirement of 5)
+  ND2        PASS     Found 10 persistent IP addresses (meets minimum requirement of 5)
+  ND3        PASS     Found 10 persistent IP addresses (meets minimum requirement of 5)
 
-[Check  7/14] Disk Space...                                                       PASS
+[Check  7/16] Disk Space...                                                       PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      All directories are under 70% usage
-  ND2        PASS      All directories are under 70% usage
-  ND3        PASS      All directories are under 70% usage
+  ND1        PASS     All directories are under 70% usage
+  ND2        PASS     All directories are under 70% usage
+  ND3        PASS     All directories are under 70% usage
 
-[Check  8/14] Pod Status...                                                       PASS
+[Check  8/16] Pod Status...                                                       PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      All Pods and Services are in a healthy state
-  ND2        PASS      All Pods and Services are in a healthy state
-  ND3        PASS      All Pods and Services are in a healthy state
+  ND1        PASS     All Pods and Services are in a healthy state
+  ND2        PASS     All Pods and Services are in a healthy state
+  ND3        PASS     All Pods and Services are in a healthy state
 
-[Check  9/14] System Health...                                                    PASS
+[Check  9/16] System Health...                                                    PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      acs health indicates Node is healthy
-  ND2        PASS      acs health indicates Node is healthy
-  ND3        PASS      acs health indicates Node is healthy
+  ND1        PASS     acs health indicates Node is healthy
+  ND2        PASS     acs health indicates Node is healthy
+  ND3        PASS     acs health indicates Node is healthy
 
-[Check 10/14] Certificate Check...                                                PASS
+[Check 10/16] Nxos Discovery Service...                                           PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      No certificate issues found in SM logs
-  ND2        PASS      No certificate issues found in SM logs
-  ND3        PASS      No certificate issues found in SM logs
+  ND1        PASS     Deployment Mode is not ndfc-fabric-ndi
+  ND2        PASS     Deployment Mode is not ndfc-fabric-ndi
+  ND3        PASS     Deployment Mode is not ndfc-fabric-ndi
 
-[Check 11/14] Iso Check...                                                        PASS
+[Check 11/16] Backup Failure Check...                                             PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      No multiple ISO issues found
-  ND2        PASS      No multiple ISO issues found
-  ND3        PASS      No multiple ISO issues found
+  ND1        PASS     All backup jobs completed successfully
+  ND2        PASS     All backup jobs completed successfully
+  ND3        PASS     All backup jobs completed successfully
 
-[Check 12/14] Lvm Pvs Check...                                                    PASS
+[Check 12/16] Certificate Check...                                                PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      No empty Elasticsearch PVs found
-  ND2        PASS      No empty Elasticsearch PVs found
-  ND3        PASS      No empty Elasticsearch PVs found
+  ND1        PASS     No certificate issues found in SM logs
+  ND2        PASS     No certificate issues found in SM logs
+  ND3        PASS     No certificate issues found in SM logs
 
-[Check 13/14] Atom0 Nvme Check...                                                 PASS
+[Check 13/16] Iso Check...                                                        PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      NVME drive seen by ND in PVS file
-  ND2        PASS      NVME drive seen by ND in PVS file
-  ND3        PASS      NVME drive seen by ND in PVS file
+  ND1        PASS     No multiple ISO issues found
+  ND2        PASS     No multiple ISO issues found
+  ND3        PASS     No multiple ISO issues found
 
-[Check 14/14] Atom0 Vg Check...                                                   PASS
+[Check 14/16] Lvm Pvs Check...                                                    PASS
   Node       Status   Details
   ---------- -------- --------------------------------------------------
-  ND1        PASS      atom0 vg has more than 50G free space
-  ND2        PASS      atom0 vg has more than 50G free space
-  ND3        PASS      atom0 vg has more than 50G free space
+  ND1        PASS     No empty Elasticsearch PVs found
+  ND2        PASS     No empty Elasticsearch PVs found
+  ND3        PASS     No empty Elasticsearch PVs found
+
+[Check 15/16] Atom0 Nvme Check...                                                 PASS
+  Node       Status   Details
+  ---------- -------- --------------------------------------------------
+  ND1        PASS     NVME drive seen by ND in PVS file
+  ND2        PASS     NVME drive seen by ND in PVS file
+  ND3        PASS     NVME drive seen by ND in PVS file
+
+[Check 16/16] Atom0 Vg Check...                                                   PASS
+  Node       Status   Details
+  ---------- -------- --------------------------------------------------
+  ND1        PASS     atom0 vg has more than 50G free space
+  ND2        PASS     atom0 vg has more than 50G free space
+  ND3        PASS     atom0 vg has more than 50G free space
 
 
-Detailed results are available in /root/Downloads/pre/final-results/
+Detailed results are available in /root/Downloads/preupgrade/final-results/
 
-Results Bundle: /root/Downloads/pre/nd-preupgrade-validation-results_2025-10-20T20-23-57.tgz
+Results Bundle: /root/Downloads/preupgrade/nd-preupgrade-validation-results_2025-11-05T20-22-04.tgz
 
-[root@localhost pre]# ls -lh
-total 332K
-drwxr-xr-x. 2 root root  236 Oct 20 20:23 final-results
--rw-r--r--. 1 root root 162K Oct 20 16:29 ND-Preupgrade-Validation.py
--rw-r--r--. 1 root root 8.5K Oct 20 20:23 nd-preupgrade-validation-results_2025-10-20T20-23-57.tgz
--rw-r--r--. 1 root root 154K Oct 20 19:47 worker_functions.py
+[root@localhost preupgrade]# ls -lh
+total 372K
+drwxr-xr-x. 2 root root  236 Nov  5 20:22 final-results
+-rw-r--r--. 1 root root 178K Nov  5 20:18 ND-Preupgrade-Validation.py
+-rw-r--r--. 1 root root  12K Nov  5 20:22 nd-preupgrade-validation-results_2025-11-05T20-22-04.tgz
+-rw-r--r--. 1 root root 177K Nov  5 18:42 worker_functions.py
 
-[root@localhost pre]# ls -lh final-results/
-total 92K
--rw-r--r--. 1 root root 7.7K Oct 20 20:23 ND1_output.log
--rw-r--r--. 1 root root 2.0K Oct 20 20:23 ND1_results.json
--rw-r--r--. 1 root root 7.7K Oct 20 20:23 ND2_output.log
--rw-r--r--. 1 root root 2.0K Oct 20 20:23 ND2_results.json
--rw-r--r--. 1 root root 7.7K Oct 20 20:23 ND3_output.log
--rw-r--r--. 1 root root 2.0K Oct 20 20:23 ND3_results.json
--rw-r--r--. 1 root root  39K Oct 20 20:23 nd_validation_debug.log
--rw-r--r--. 1 root root 5.1K Oct 20 20:23 validation_details.json
--rw-r--r--. 1 root root 5.6K Oct 20 20:23 validation_summary.txt
+[root@localhost preupgrade]# ls -lh final-results/
+total 128K
+-rw-r--r--. 1 root root 8.9K Nov  5 20:22 ND1_output.log
+-rw-r--r--. 1 root root 2.3K Nov  5 20:21 ND1_results.json
+-rw-r--r--. 1 root root 8.9K Nov  5 20:22 ND2_output.log
+-rw-r--r--. 1 root root 2.3K Nov  5 20:22 ND2_results.json
+-rw-r--r--. 1 root root 8.9K Nov  5 20:21 ND3_output.log
+-rw-r--r--. 1 root root 2.3K Nov  5 20:21 ND3_results.json
+-rw-r--r--. 1 root root  63K Nov  5 20:22 nd_validation_debug.log
+-rw-r--r--. 1 root root 5.8K Nov  5 20:22 validation_details.json
+-rw-r--r--. 1 root root 6.3K Nov  5 20:22 validation_summary.txt
+
+
 ```
 
 ## Support

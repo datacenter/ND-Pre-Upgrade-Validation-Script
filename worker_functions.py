@@ -68,7 +68,8 @@ results = {
         "persistent_ip_check": {"status": "PASS", "details": []},  # Persistent IP configuration check
         "atom0_nvme_check": {"status": "PASS", "details": []},  # NVME drive health check for physical nodes
         "atom0_vg_check": {"status": "PASS", "details": []},  # atom0 virtual group space check
-        "nxos_discovery_service": {"status": "PASS", "details": []}  # NXOS Discovery Service check CSCwm97680
+        "nxos_discovery_service": {"status": "PASS", "details": []},  # NXOS Discovery Service check CSCwm97680
+        "backup_failure_check": {"status": "PASS", "details": []}  # Backup job failure check CSCwq57968/CSCwm96512
     }
 }
 
@@ -1713,6 +1714,210 @@ def check_nxos_discovery_service(tech_file):
     results["checks"]["nxos_discovery_service"]["status"] = "PASS"
     results["checks"]["nxos_discovery_service"]["details"] = [
         "cisco-ndfc k8 App in Enabled state"
+    ]
+    
+    return True
+
+def check_backup_failure(tech_file):
+    """
+    Check for failed or stuck backup jobs in k8-lifecycle.yaml
+    
+    This check parses k8-lifecycle.yaml and looks for backup jobs per namespace.
+    It evaluates the most recent backup job in each namespace and fails if:
+    1. Any backup job has status: Failed (CSCwq57968)
+    2. Any backup job has status: InProgress (CSCwq57968)
+    3. For MSO (cisco-mso namespace): InProgress on versions < 3.2.2f (CSCwm96512)
+    
+    References: CSCwq57968, CSCwm96512
+    """
+    print_section("Checking Backup Job Status on {0}".format(NODE_NAME))
+    update_status("running", "Checking Backup Job Status", 99)
+    
+    node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
+    
+    # Use file cache for faster file discovery
+    cache = get_file_cache()
+    
+    # Find k8-lifecycle.yaml file
+    lifecycle_files = cache.find_files("k8-diag/kubectl/k8-lifecycle.yaml")
+    
+    if not lifecycle_files:
+        print("[WARNING] k8-lifecycle.yaml file not found in tech support")
+        results["checks"]["backup_failure_check"]["status"] = "WARNING"
+        results["checks"]["backup_failure_check"]["details"] = [
+            "Unable to verify backup job status"
+        ]
+        results["checks"]["backup_failure_check"]["recommendation"] = "Contact Cisco TAC for further verification."
+        return False
+    
+    lifecycle_file = lifecycle_files[0]
+    print("Found k8-lifecycle.yaml: {0}".format(lifecycle_file))
+    
+    # Get ND version for MSO-specific logic
+    version_files = cache.find_files("acs-checks/acs_version")
+    nd_version = None
+    if version_files:
+        try:
+            with open(version_files[0], 'r') as f:
+                version_line = f.read().strip()
+                if "Nexus Dashboard" in version_line:
+                    nd_version = version_line.split("Nexus Dashboard")[1].strip()
+                else:
+                    nd_version = version_line
+                print("ND Version: {0}".format(nd_version))
+        except Exception as e:
+            print("[WARNING] Could not read version file: {0}".format(str(e)))
+    
+    # Parse the YAML file to extract backup jobs per namespace
+    # Structure: items[] -> namespace -> workflows[] -> name: Backup -> status.state.status
+    backup_jobs = {}  # namespace -> [(creation_time, status, name)]
+    
+    try:
+        with open(lifecycle_file, 'r') as f:
+            content = f.read()
+            
+        # Parse YAML manually (avoiding yaml library for compatibility)
+        # Look for items with "name: Backup" in workflows
+        lines = content.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            
+            # Look for "- apiVersion: case.cncf.io/v1" (start of a new item)
+            if line.strip().startswith('- apiVersion: case.cncf.io/v1'):
+                # Parse this item
+                namespace = None
+                creation_time = None
+                lifecycle_name = None
+                has_backup_workflow = False
+                backup_status = None
+                
+                # Scan forward to get namespace, creationTimestamp, name, and workflows
+                j = i + 1
+                indent_level = len(line) - len(line.lstrip())
+                
+                while j < len(lines):
+                    curr_line = lines[j]
+                    curr_indent = len(curr_line) - len(curr_line.lstrip())
+                    
+                    # Stop if we reach the next item (same indent level with "- apiVersion")
+                    if curr_indent <= indent_level and curr_line.strip().startswith('- apiVersion:'):
+                        break
+                    
+                    # Extract namespace
+                    if 'namespace:' in curr_line and not namespace:
+                        namespace = curr_line.split('namespace:')[1].strip()
+                    
+                    # Extract creationTimestamp
+                    if 'creationTimestamp:' in curr_line and not creation_time:
+                        creation_time = curr_line.split('creationTimestamp:')[1].strip().strip('"')
+                    
+                    # Extract lifecycle name (metadata.name) - check if it starts with "backup-"
+                    if curr_line.strip().startswith('name:') and not lifecycle_name and 'metadata' in '\n'.join(lines[max(0, j-10):j]):
+                        potential_name = curr_line.split('name:')[1].strip()
+                        if potential_name.startswith('backup-'):
+                            lifecycle_name = potential_name
+                            # If lifecycle name is a backup job, we can assume it has a Backup workflow
+                            has_backup_workflow = True
+                    
+                    # If we have a backup workflow, look for status fields
+                    # We want the LAST "status:" field that has value Completed/Failed/InProgress
+                    if has_backup_workflow and 'status:' in curr_line:
+                        potential_status = curr_line.split('status:')[1].strip()
+                        # Only update if it's one of our target statuses
+                        if potential_status in ['Completed', 'Failed', 'InProgress']:
+                            backup_status = potential_status
+                    
+                    j += 1
+                
+                # If we found a backup workflow with all required info, store it
+                if namespace and has_backup_workflow and creation_time and backup_status:
+                    if namespace not in backup_jobs:
+                        backup_jobs[namespace] = []
+                    backup_jobs[namespace].append((creation_time, backup_status, lifecycle_name))
+                    print("Found backup job in namespace {0}: {1} (status: {2})".format(
+                        namespace, lifecycle_name, backup_status))
+                
+                i = j
+            else:
+                i += 1
+    
+    except Exception as e:
+        print("[WARNING] Error parsing k8-lifecycle.yaml: {0}".format(str(e)))
+        results["checks"]["backup_failure_check"]["status"] = "WARNING"
+        results["checks"]["backup_failure_check"]["details"] = [
+            "Unable to verify backup job status: {0}".format(str(e))
+        ]
+        results["checks"]["backup_failure_check"]["recommendation"] = "Contact Cisco TAC for further verification."
+        return False
+    
+    # Check if we found any backup jobs
+    if not backup_jobs:
+        print("[PASS] No backup jobs found in k8-lifecycle.yaml")
+        results["checks"]["backup_failure_check"]["status"] = "PASS"
+        results["checks"]["backup_failure_check"]["details"] = [
+            "No backup jobs found"
+        ]
+        return True
+    
+    # Evaluate each namespace's most recent backup job
+    failed_namespaces = []
+    inprogress_namespaces = []
+    
+    for namespace, jobs in backup_jobs.items():
+        # Sort by creation time (most recent first)
+        jobs_sorted = sorted(jobs, key=lambda x: x[0], reverse=True)
+        most_recent = jobs_sorted[0]
+        creation_time, status, name = most_recent
+        
+        print("Namespace {0}: Most recent backup '{1}' has status '{2}'".format(
+            namespace, name, status))
+        
+        # Check for Failed status
+        if status == 'Failed':
+            failed_namespaces.append(namespace)
+            print("[FAIL] Namespace {0} has failed backup job".format(namespace))
+        
+        # Check for InProgress status
+        elif status == 'InProgress':
+            inprogress_namespaces.append(namespace)
+            print("[FAIL] Namespace {0} has backup job stuck in InProgress".format(namespace))
+    
+    # Generate results based on findings
+    if failed_namespaces or inprogress_namespaces:
+        results["checks"]["backup_failure_check"]["status"] = "FAIL"
+        details = []
+        
+        if failed_namespaces:
+            details.append("Failed backup jobs found in: {0}".format(", ".join(failed_namespaces)))
+        
+        if inprogress_namespaces:
+            # Check if any InProgress is MSO and if version < 3.2.2f
+            mso_inprogress = 'cisco-mso' in inprogress_namespaces
+            if mso_inprogress and nd_version:
+                details.append("MSO backup job stuck in InProgress state (CSCwm96512)")
+            
+            details.append("Backup jobs stuck in InProgress: {0}".format(", ".join(inprogress_namespaces)))
+        
+        results["checks"]["backup_failure_check"]["details"] = details
+        results["checks"]["backup_failure_check"]["explanation"] = (
+            "Backup jobs in Failed or InProgress state can cause upgrade failures. \n"
+            "  These jobs must be resolved before proceeding with upgrade."
+        )
+        results["checks"]["backup_failure_check"]["recommendation"] = (
+            "Contact Cisco TAC for assistance in resolving backup job issues."
+        )
+        results["checks"]["backup_failure_check"]["reference"] = (
+            "https://bst.cisco.com/bugsearch/bug/CSCwq57968"
+        )
+        
+        return False
+    
+    # All backup jobs are in Completed state
+    print("[PASS] All backup jobs completed successfully")
+    results["checks"]["backup_failure_check"]["status"] = "PASS"
+    results["checks"]["backup_failure_check"]["details"] = [
+        "All backup jobs completed successfully"
     ]
     
     return True
@@ -3474,10 +3679,13 @@ def main():
         
         # Process tech support based on command line argument
         tech_file = None
-        if operation == "generate":
+        # If a tech support path is provided, always use it (don't generate a new one)
+        if tech_support_path:
+            tech_file = select_techsupport(tech_support_path)
+        elif operation == "generate":
             tech_file = generate_techsupport(nd_version)
         else:
-            tech_file = select_techsupport(tech_support_path)
+            tech_file = select_techsupport(None)
         
         if not tech_file:
             update_status("error", "Failed to obtain tech support file", 0)
@@ -3557,6 +3765,13 @@ def main():
                 print("[ERROR] NXOS Discovery Service check failed: {0}".format(str(e)))
                 results["checks"]["nxos_discovery_service"]["status"] = "FAIL"
                 results["checks"]["nxos_discovery_service"]["details"] = ["Check failed: {0}".format(str(e))]
+                
+            try:
+                check_backup_failure(dest_path)
+            except Exception as e:
+                print("[ERROR] Backup failure check failed: {0}".format(str(e)))
+                results["checks"]["backup_failure_check"]["status"] = "FAIL"
+                results["checks"]["backup_failure_check"]["details"] = ["Check failed: {0}".format(str(e))]
                 
             try:
                 check_CA_CSCwm35992(dest_path)

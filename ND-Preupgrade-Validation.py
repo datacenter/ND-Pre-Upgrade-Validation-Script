@@ -1070,7 +1070,7 @@ class TechSupportManager:
             logger.info(f"Pre-command timestamp for {node['name']}: {pre_command_timestamp}")
             
             # Generate a new tech support directly in the standard location
-            print(f"Generating tech support on {node['name']}...")
+            logger.info(f"Generating tech support on {node['name']}...")
             print(f"Starting tech support collection on {node['name']}. This may take several minutes...")
             
             # Get the appropriate tech support command based on ND version
@@ -1122,12 +1122,13 @@ class TechSupportManager:
                 print(f"Tech support command executed on {node['name']} with no output, checking for file generation...")
             
             # Wait and retry loop to wait for the tech support to be generated
-            # HARD LIMIT: Maximum 5 retries = 2.5 minutes total wait time
-            MAX_RETRIES = 5
-            retry_interval = 30
+            # Monitor file size growth - continue waiting as long as the file is actively growing
+            retry_interval = 30  # Check for new files every 30 seconds
+            stale_check_interval = 5  # Once size stops increasing, verify every 5 seconds
+            max_stale_checks = 3  # Maximum consecutive checks with no size increase (at 5-second intervals = 15 seconds total)
             
             logger.info(f"Waiting for tech support generation to complete on {node['name']}...")
-            print(f"Waiting for tech support generation to complete on {node['name']}. This may take up to {MAX_RETRIES * retry_interval // 60} minutes...")
+            # Don't print to console - we'll show status when file is detected
             
             # Record all existing tech support files to detect new ones
             cmd_existing = self.node_manager.build_ssh_command(node['ip'], f"find {self.tech_dir} -name '*{node['name']}.tgz' -type f -printf '%T@ %p\\n'")
@@ -1147,17 +1148,23 @@ class TechSupportManager:
             # Now wait and look for a new file with timestamp AFTER our pre_command_timestamp
             found_tech_support = None
             no_processes_detected = False
+            tracked_file = None  # Track which file we're monitoring for size changes
+            last_size = 0
+            stale_count = 0  # Count consecutive checks with no size increase
+            retry_number = 0
             
-            for retry in range(MAX_RETRIES):
+            while True:
+                # Always wait the full retry_interval (30 seconds) between checks
+                # We'll do rapid verification at 5-second intervals only when size stops increasing
                 time.sleep(retry_interval)
-                retry_number = retry + 1
+                retry_number += 1
                 
-                logger.info(f"Tech support check attempt {retry_number}/{MAX_RETRIES} for {node['name']}")
-                print(f"Checking for tech support file (attempt {retry_number}/{MAX_RETRIES})...")
+                logger.info(f"Tech support check attempt {retry_number} for {node['name']}")
+                # Don't print status here - we'll print more meaningful status in the loop below
                 
                 # On first few retries, check if tech support processes are actually running
                 # This helps detect early if the command failed to start properly
-                if retry < 3 and not no_processes_detected:  # Check on first 3 retries (first 1.5 minutes)
+                if retry_number <= 3 and not no_processes_detected:  # Check on first 3 retries (first 1.5 minutes)
                     logger.debug(f"Checking if tech support processes are running on {node['name']}")
                     cmd_check_processes = self.node_manager.build_ssh_command(node['ip'], "ps aux | grep -i techsupport | grep -v grep || echo 'no_processes'")
                     process = subprocess.Popen(cmd_check_processes, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1179,7 +1186,7 @@ class TechSupportManager:
                 stdout, stderr = process.communicate()
                 
                 if process.returncode != 0:
-                    logger.warning(f"Failed to get current date on {node['name']} (retry {retry+1})")
+                    logger.warning(f"Failed to get current date on {node['name']} (retry {retry_number})")
                     continue
                     
                 current_date = stdout.decode('utf-8').strip()
@@ -1202,13 +1209,14 @@ class TechSupportManager:
                 stdout, stderr = process.communicate()
                 
                 if process.returncode != 0 or not stdout:
-                    logger.warning(f"Failed to list tech support files on {node['name']} (retry {retry+1})")
+                    logger.warning(f"Failed to list tech support files on {node['name']} (retry {retry_number})")
                     continue
                 
                 ts_files = stdout.decode('utf-8').strip().split('\n')
                 
                 # First look for a tech support that is NOT in our existing list
                 # AND has a timestamp in the filename AFTER our pre_command_timestamp
+                current_check_size = 0  # Track the size of the file we're checking this iteration
                 for ts_file in ts_files:
                     if not ts_file.strip():
                         continue
@@ -1247,67 +1255,113 @@ class TechSupportManager:
                         if pre_timestamp_nosec and ts_part > pre_timestamp_nosec:
                             logger.info(f"Found new tech support with timestamp after command: {filename}")
                             
-                            # Verify the file size is stable (not still being written)
-                            # First check size
-                            initial_size = size_bytes
-                            logger.info(f"Verifying if tech support file is complete by checking if size is stable. Initial size: {initial_size} bytes")
-                            print(f"Verifying tech support file stability for {node['name']}...")
-                            
-                            # Wait 3 seconds
-                            time.sleep(3)
-                            
-                            # Check size again
-                            cmd_size = self.node_manager.build_ssh_command(node['ip'], f"stat -c %s {filepath}")
-                            process = subprocess.Popen(cmd_size, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                            stdout, stderr = process.communicate()
-                            
-                            if process.returncode != 0:
-                                logger.warning(f"Failed to get file size for verification on {filepath}")
-                                continue
-                                
-                            try:
-                                new_size = int(stdout.decode('utf-8').strip())
-                                logger.info(f"New size after 3 seconds: {new_size} bytes")
-                                
-                                if new_size != initial_size:
-                                    logger.warning(f"Tech support file still being written, size changed from {initial_size} to {new_size}. Will check again next iteration.")
-                                    continue
-                                    
-                                logger.info(f"Tech support file size is stable. File appears to be complete.")
-                                found_tech_support = filepath
+                            # Track this file for size monitoring
+                            if tracked_file is None:
+                                tracked_file = filepath
+                                last_size = size_bytes
+                                logger.info(f"Started tracking tech support file: {filepath}, initial size: {size_bytes} bytes")
+                                print(f"Found tech support file being generated on {node['name']}, monitoring for completion...")
+                                # Skip size comparison on first detection - we need to wait for next check
                                 break
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"Error parsing file size: {str(e)}")
-                                continue
+                            
+                            # Update current check size
+                            current_check_size = size_bytes
+                            
+                            # If this is the file we're tracking, check if size has grown
+                            if tracked_file == filepath:
+                                if size_bytes > last_size:
+                                    # Size is increasing - file is still being generated
+                                    size_increase = size_bytes - last_size
+                                    logger.info(f"Tech support file size increased from {last_size} to {size_bytes} bytes (+{size_increase} bytes)")
+                                    print(f"Tech support still generating on {node['name']}: {size_bytes / (1024**3):.2f} GB (+{size_increase / (1024**2):.1f} MB)...")
+                                    last_size = size_bytes
+                                    stale_count = 0  # Reset stale counter since size increased
+                                elif size_bytes == last_size:
+                                    # Size hasn't changed - perform rapid verification immediately
+                                    logger.info(f"Tech support file size unchanged at {size_bytes} bytes, performing rapid verification")
+                                    print(f"File size stable on {node['name']}, performing verification checks...")
+                                    
+                                    # Perform 3 rapid verification checks at 5-second intervals (15 seconds total)
+                                    verification_stable = True
+                                    for verify_check in range(max_stale_checks):
+                                        time.sleep(stale_check_interval)
+                                        
+                                        cmd_size = self.node_manager.build_ssh_command(node['ip'], f"stat -c %s {filepath}")
+                                        process = subprocess.Popen(cmd_size, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                        stdout, stderr = process.communicate()
+                                        
+                                        if process.returncode != 0:
+                                            logger.warning(f"Failed to get file size for verification check {verify_check + 1} on {filepath}")
+                                            verification_stable = False
+                                            break
+                                        
+                                        try:
+                                            verify_size = int(stdout.decode('utf-8').strip())
+                                            logger.info(f"Verification check {verify_check + 1}/{max_stale_checks}: size = {verify_size} bytes")
+                                            
+                                            if verify_size != size_bytes:
+                                                # Size changed during verification - still generating
+                                                logger.info(f"Size changed during verification ({size_bytes} -> {verify_size}), file still generating")
+                                                print(f"Tech support still generating on {node['name']}, continuing to monitor...")
+                                                last_size = verify_size
+                                                stale_count = 0
+                                                verification_stable = False
+                                                break
+                                        except (ValueError, TypeError) as e:
+                                            logger.warning(f"Error parsing file size during verification: {str(e)}")
+                                            verification_stable = False
+                                            break
+                                    
+                                    # If all 3 verification checks showed stable size, file is complete
+                                    if verification_stable:
+                                        logger.info(f"Tech support file confirmed complete after {max_stale_checks} consecutive stable checks at {stale_check_interval}-second intervals")
+                                        print(f"Tech support generation confirmed complete on {node['name']}")
+                                        found_tech_support = filepath
+                                        break
+                                    # If verification failed (size changed), we'll continue the outer loop for next 30-second check
+                            break  # Exit the for loop since we found our tracked file
                 
                 # If we found a new tech support with proper timestamp and stable size, we're done
                 if found_tech_support:
                     break
+                
+                # Check if we should give up (only if no file was found at all after initial retries)
+                if tracked_file is None and retry_number >= 3:
+                    # No file appeared after 3 retries (1.5 minutes), likely a failure
+                    logger.error(f"No new tech support file appeared on {node['name']} after {retry_number} checks")
+                    print(f"{FAIL} Tech support generation failed on {node['name']} - no new file detected.")
+                    print(f"No new tech support with timestamp after {pre_command_timestamp} was found.")
+                    print(f"")
+                    if no_processes_detected:
+                        print(f"⚠️  WARNING: No tech support processes were detected running on the node.")
+                    print(f"This usually indicates one of the following:")
+                    print(f"  1. The tech support command failed due to invalid arguments")
+                    print(f"  2. The tech support command is not supported on this ND version")
+                    print(f"  3. There is insufficient disk space to generate the tech support")
+                    print(f"")
+                    print(f"To debug this issue:")
+                    print(f"  1. SSH to {node['name']} and manually run: {techsupport_cmd}")
+                    print(f"  2. Check disk space with: df -h")
+                    print(f"  3. Check for running processes with: ps aux | grep techsupport")
+                    return None
+                
+                # Note: We no longer need a separate stale check here because we perform
+                # immediate rapid verification when size stops increasing (handled in the file checking loop above)
                     
-                # If we're still looking, print status for the user
-                if retry_number < MAX_RETRIES:
-                    print(f"Tech support not ready yet on {node['name']}, waiting {retry_interval} seconds before next check...")
+                # Log elapsed time for debugging but don't print to console (too verbose)
+                elapsed_time = retry_number * retry_interval / 60
+                if tracked_file:
+                    logger.debug(f"Tech support generation in progress on {node['name']} ({elapsed_time:.1f} minutes elapsed)")
+                else:
+                    logger.debug(f"Waiting for tech support file to appear on {node['name']} ({elapsed_time:.1f} minutes elapsed)")
             
-            # If we couldn't find a tech support with timestamp AFTER our command time,
-            # don't fall back to an older one
+            # We should only get here if found_tech_support is set
             if not found_tech_support:
-                logger.error(f"No new tech support found on {node['name']} after {MAX_RETRIES} retries ({MAX_RETRIES * retry_interval // 60} minutes)")
-                print(f"{FAIL} Tech support generation timed out on {node['name']} after {MAX_RETRIES} attempts.")
-                print(f"No new tech support with timestamp after {pre_command_timestamp} was found.")
-                print(f"")
-                if no_processes_detected:
-                    print(f"⚠️  WARNING: No tech support processes were detected running on the node.")
-                print(f"This usually indicates one of the following:")
-                print(f"  1. The tech support command failed due to invalid arguments")
-                print(f"  2. The tech support command is not supported on this ND version")
-                print(f"  3. There is insufficient disk space to generate the tech support")
-                print(f"  4. The tech support process is still running but taking longer than {MAX_RETRIES * retry_interval // 60} minutes")
-                print(f"")
-                print(f"To debug this issue:")
-                print(f"  1. SSH to {node['name']} and manually run: {techsupport_cmd}")
-                print(f"  2. Check disk space with: df -h")
-                print(f"  3. Check for running processes with: ps aux | grep techsupport")
+                logger.error(f"Unexpected state: exited monitoring loop without finding tech support on {node['name']}")
                 return None
+            
+            # Calculate total elapsed time
+            elapsed_time = retry_number * retry_interval / 60
             
             # Verify the tech support exists and has non-zero size
             cmd = self.node_manager.build_ssh_command(node['ip'], f"test -s {found_tech_support} && echo 'exists' || echo 'not found'")
@@ -1315,7 +1369,8 @@ class TechSupportManager:
             stdout, stderr = process.communicate()
             
             if "exists" in stdout.decode('utf-8'):
-                print(f"Tech support generated on {node['name']}: {found_tech_support}")
+                print(f"{PASS} Tech support generated on {node['name']}: {found_tech_support}")
+                logger.info(f"Generation took approximately {elapsed_time:.1f} minutes")
                 
                 # Final check - validate the tech support file by looking at its structure
                 cmd_validate = self.node_manager.build_ssh_command(node['ip'], f"gzip -t {found_tech_support} && echo 'valid' || echo 'invalid'")
@@ -2508,8 +2563,7 @@ def process_all_nodes(node_manager, tech_choice, debug_mode=False, skipped_nodes
     
     if tech_choice == "1":
         # Generate new tech supports IN PARALLEL for all nodes
-        print("Generating tech supports for all nodes in parallel. This may take several minutes...")
-        print("(Press Ctrl+C to abort if needed)")
+        print("Generating tech supports for all nodes in parallel.")
         
         # Use ThreadPoolExecutor to generate tech supports in parallel
         try:
@@ -2944,6 +2998,7 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
             "pod_status", 
             "system_health",
             "nxos_discovery_service",
+            "backup_failure_check",
             "certificate_check",
             "iso_check",
             "lvm_pvs_check",
@@ -3098,25 +3153,40 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
                     
                     # Display first detail line with properly aligned details
                     if filtered_details:
-                        # Fixed alignment for console output - key change #1
-                        details_indent = 20  # node_indent(2) + node_name(10) + space(1) + status(variable) + space(variable)
+                        # Calculate padding needed for status column alignment
+                        # Status column should be 8 chars wide (to fit "WARNING")
+                        # ANSI codes don't count toward display width, so we need to pad based on actual text
+                        if status == "FAIL":
+                            status_padding = 4  # "FAIL" is 4 chars, need 4 more spaces to reach 8
+                        elif status == "WARNING":
+                            status_padding = 1  # "WARNING" is 7 chars, need 1 more space to reach 8
+                        else:  # PASS
+                            status_padding = 4  # "PASS" is 4 chars, need 4 more spaces to reach 8
                         
-                        # First line includes node name and status
-                        detail_line = f"{node_indent}{node_name:<10} {status_str}      {filtered_details[0]}"
+                        # First line includes node name and status with proper padding
+                        detail_line = f"{node_indent}{node_name:<10} {status_str}{' ' * status_padding} {filtered_details[0]}"
                         print(detail_line)
                         
                         # For text file (proper alignment without ANSI color codes)
                         summary_file.write(f"{node_indent}{node_name:<10} {status_str_txt:<8} {filtered_details[0]}\n")
                         
-                        # Display additional detail lines with fixed alignment indent - key change #2
+                        # Display additional detail lines with fixed alignment indent
                         for detail in filtered_details[1:]:
-                            # For console: indent properly to align with Details column
-                            print(f"{node_indent}{' '*18}{detail}")
+                            # For console: indent properly to align with Details column (2 + 10 + 1 + 8 + 1 = 22)
+                            print(f"{node_indent}{' '*10} {' '*8} {detail}")
                             # For text file: use consistent alignment
-                            summary_file.write(f"{node_indent}{' '*18}{detail}\n")
+                            summary_file.write(f"{node_indent}{' '*10} {' '*8} {detail}\n")
                     else:
+                        # Calculate padding for no details case
+                        if status == "FAIL":
+                            status_padding = 4
+                        elif status == "WARNING":
+                            status_padding = 1
+                        else:  # PASS
+                            status_padding = 4
+                        
                         # For console
-                        no_details = f"{node_indent}{node_name:<10} {status_str}     No details available"
+                        no_details = f"{node_indent}{node_name:<10} {status_str}{' ' * status_padding} No details available"
                         print(no_details)
                         # For text file
                         summary_file.write(f"{node_indent}{node_name:<10} {status_str_txt:<8} No details available\n")
