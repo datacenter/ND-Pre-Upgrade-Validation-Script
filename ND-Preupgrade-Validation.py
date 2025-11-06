@@ -8,7 +8,7 @@ This script performs health checks on a Nexus Dashboard cluster:
 - Results are aggregated at the end for a comprehensive report
 
 Author: joelebla@cisco.com
-Version: 1.0.2 (Oct 20, 2025)
+Version: 1.0.3 (Nov 6, 2025)
 """
 
 import re
@@ -1443,7 +1443,7 @@ class WorkerScriptManager:
                 
                 return False, stdout.decode('utf-8'), stderr.decode('utf-8')
             
-            # Optimize: Use SCP for file transfer then SSH for setup - avoids argument length limits
+            # Use SCP for file transfer then SSH for setup - avoids argument length limits
             # Create local temporary file for the worker script
             with MultipleFileManager() as file_manager:
                 temp_path = tempfile.mktemp()
@@ -2999,6 +2999,7 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
             "system_health",
             "nxos_discovery_service",
             "backup_failure_check",
+            "nameserver_duplicate_check",
             "certificate_check",
             "iso_check",
             "lvm_pvs_check",
@@ -3299,7 +3300,7 @@ def main():
     
     args = parser.parse_args()
     
-    print("Nexus Dashboard Pre-upgrade Validation Script (Distributed Version)")
+    print("Nexus Dashboard Pre-upgrade Validation Script")
     print(f"Running validation checks on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
     # Get ND IP with validation

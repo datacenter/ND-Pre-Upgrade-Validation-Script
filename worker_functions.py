@@ -69,7 +69,8 @@ results = {
         "atom0_nvme_check": {"status": "PASS", "details": []},  # NVME drive health check for physical nodes
         "atom0_vg_check": {"status": "PASS", "details": []},  # atom0 virtual group space check
         "nxos_discovery_service": {"status": "PASS", "details": []},  # NXOS Discovery Service check CSCwm97680
-        "backup_failure_check": {"status": "PASS", "details": []}  # Backup job failure check CSCwq57968/CSCwm96512
+        "backup_failure_check": {"status": "PASS", "details": []},  # Backup job failure check CSCwq57968/CSCwm96512
+        "nameserver_duplicate_check": {"status": "PASS", "details": []}  # Duplicate nameserver configuration check
     }
 }
 
@@ -455,7 +456,7 @@ def extract_from_techsupport(tech_file, file_pattern, destination=None):
     else:
         dest_arg = ""
     
-    # OPTIMIZATION: Use unified command runner for consistent behavior
+    # Use unified command runner for consistent behavior
     extract_cmd = "tar -xzf {0} {1} --wildcards '{2}' 2>/dev/null || tar -xf {0} {1} --wildcards '{2}'".format(
         tech_file, dest_arg, file_pattern)
     
@@ -754,7 +755,7 @@ def check_subnet_isolation():
         # If subnet check failed, add explanation and recommendation
         if results["checks"]["subnet_check"]["status"] == "FAIL":
             explanation = "  Explanation:\n  The Management network and Data network must be on different subnets."
-            recommendation = "  Recommendation:\n  Change the subnet schema of the Management network or Data network so there is\n  no overlap."
+            recommendation = "  Recommendation:\n  1. Change the subnet schema of the Management network or Data network so there is no overlap.\n  2. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  3. If the check is still a FAIL, contact Cisco TAC."
             
             # Add explanation and recommendation to the details
             results["checks"]["subnet_check"]["details"].append("\n{0}".format(explanation))
@@ -1504,17 +1505,24 @@ def check_nxos_discovery_service(tech_file):
     # Use file cache for faster file discovery
     cache = get_file_cache()
     
-    # Step 1: Check ND version - this check only applies to ND 3.1.1 and later
-    version_files = cache.find_files("acs-checks/acs_version")
-    if not version_files:
-        print("[WARNING] acs_version file not found")
+    # Helper function to set WARNING status with consistent message
+    def set_warning_status(reason):
+        print("[WARNING] {0}".format(reason))
         results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
         results["checks"]["nxos_discovery_service"]["details"] = [
             "Unable to verify NXOS Discovery Service status"
         ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
+        results["checks"]["nxos_discovery_service"]["recommendation"] = (
+            "1. Verify at least 10 External Service IPs configured in the Data Network.\n  "
+            "2. Contact Cisco TAC for further verification if required."
+        )
         results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
         return False
+    
+    # Step 1: Check ND version - this check only applies to ND 3.1.1 and later
+    version_files = cache.find_files("acs-checks/acs_version")
+    if not version_files:
+        return set_warning_status("acs_version file not found")
     
     version_file = version_files[0]
     nd_version = None
@@ -1528,14 +1536,7 @@ def check_nxos_discovery_service(tech_file):
                 nd_version = version_line
             print("ND Version: {0}".format(nd_version))
     except Exception as e:
-        print("[WARNING] Error reading version file: {0}".format(str(e)))
-        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-        results["checks"]["nxos_discovery_service"]["details"] = [
-            "Unable to verify NXOS Discovery Service status"
-        ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-        return False
+        return set_warning_status("Error reading version file: {0}".format(str(e)))
     
     # Parse version to check if < 3.1.1
     if nd_version:
@@ -1566,14 +1567,7 @@ def check_nxos_discovery_service(tech_file):
     k8_releases_files = cache.find_files("k8-diag/kubectl/k8-releases.yaml")
     
     if not k8_releases_files:
-        print("[WARNING] k8-releases.yaml file not found in tech support")
-        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-        results["checks"]["nxos_discovery_service"]["details"] = [
-            "Unable to verify NXOS Discovery Service status"
-        ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-        return False
+        return set_warning_status("k8-releases.yaml file not found in tech support")
     
     k8_releases_file = k8_releases_files[0]
     print("Found k8-releases.yaml: {0}".format(k8_releases_file))
@@ -1591,25 +1585,11 @@ def check_nxos_discovery_service(tech_file):
                         print("Found desiredDeploymentMode: {0}".format(deployment_mode))
                         break
     except Exception as e:
-        print("[WARNING] Error reading k8-releases.yaml: {0}".format(str(e)))
-        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-        results["checks"]["nxos_discovery_service"]["details"] = [
-            "Unable to verify NXOS Discovery Service status"
-        ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-        return False
+        return set_warning_status("Error reading k8-releases.yaml: {0}".format(str(e)))
     
     # Check if we found deployment mode
     if not deployment_mode:
-        print("[WARNING] desiredDeploymentMode not found in k8-releases.yaml")
-        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-        results["checks"]["nxos_discovery_service"]["details"] = [
-            "Unable to verify NXOS Discovery Service status"
-        ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-        return False
+        return set_warning_status("desiredDeploymentMode not found in k8-releases.yaml")
     
     # If not ndfc-fabric-ndi deployment, check passes
     if deployment_mode.lower() != "ndfc-fabric-ndi":
@@ -1625,14 +1605,7 @@ def check_nxos_discovery_service(tech_file):
     k8_app_files = cache.find_files("k8-diag/kubectl/k8-app")
     
     if not k8_app_files:
-        print("[WARNING] k8-app file not found in tech support")
-        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-        results["checks"]["nxos_discovery_service"]["details"] = [
-            "Unable to verify NXOS Discovery Service status"
-        ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-        return False
+        return set_warning_status("k8-app file not found in tech support")
     
     k8_app_file = k8_app_files[0]
     print("Found k8-app: {0}".format(k8_app_file))
@@ -1653,14 +1626,7 @@ def check_nxos_discovery_service(tech_file):
                 
                 # Check for error output (unexpected output case)
                 if "command not found" in line_stripped or "Error" in line_stripped:
-                    print("[WARNING] Unexpected output in k8-app file: {0}".format(line_stripped))
-                    results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-                    results["checks"]["nxos_discovery_service"]["details"] = [
-                        "Unable to verify NXOS Discovery Service status"
-                    ]
-                    results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-                    results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-                    return False
+                    return set_warning_status("Unexpected output in k8-app file: {0}".format(line_stripped))
                 
                 # Look for lines containing cisco-ndfc (case insensitive)
                 if 'cisco-ndfc' in line_stripped.lower():
@@ -1682,32 +1648,18 @@ def check_nxos_discovery_service(tech_file):
                                 "NXOS Discovery Service in Disable/Processing state"
                             ]
                             results["checks"]["nxos_discovery_service"]["explanation"] = "During upgrade to 3.1.1 and later, NXOS Discovery Service can enter problematic \n  state under certain conditions and result in subsequent upgrade failures."
-                            results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for assistance in remediation."
+                            results["checks"]["nxos_discovery_service"]["recommendation"] = "1. Verify at least 10 External Service IPs configured in the Data Network.\n  2. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  3. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
                             results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
                             return False
                     else:
                         print("[WARNING] Unexpected format in k8-app line for cisco-ndfc")
     
     except Exception as e:
-        print("[WARNING] Error reading k8-app file: {0}".format(str(e)))
-        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-        results["checks"]["nxos_discovery_service"]["details"] = [
-            "Unable to verify NXOS Discovery Service status"
-        ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-        return False
+        return set_warning_status("Error reading k8-app file: {0}".format(str(e)))
     
     # If we didn't find cisco-ndfc at all in an ndfc-fabric-ndi deployment, that's unexpected
     if not cisco_ndfc_found:
-        print("[WARNING] cisco-ndfc app not found in k8-app file for NDI deployment")
-        results["checks"]["nxos_discovery_service"]["status"] = "WARNING"
-        results["checks"]["nxos_discovery_service"]["details"] = [
-            "Unable to verify NXOS Discovery Service status"
-        ]
-        results["checks"]["nxos_discovery_service"]["recommendation"] = "Contact Cisco TAC for further verification."
-        results["checks"]["nxos_discovery_service"]["reference"] = "https://bst.cisco.com/bugsearch/bug/CSCwm97680"
-        return False
+        return set_warning_status("cisco-ndfc app not found in k8-app file for NDI deployment")
     
     # If we got here, cisco-ndfc was found and is in a good state (Enable/Enabled)
     print("[PASS] cisco-ndfc is in a healthy state (Admin: {0}, OperState: {1})".format(admin_state, operstate))
@@ -1905,7 +1857,9 @@ def check_backup_failure(tech_file):
             "  These jobs must be resolved before proceeding with upgrade."
         )
         results["checks"]["backup_failure_check"]["recommendation"] = (
-            "Contact Cisco TAC for assistance in resolving backup job issues."
+            "1. Generate a new backup job and confirm completion success.\n  "
+            "2. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  "
+            "3. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
         )
         results["checks"]["backup_failure_check"]["reference"] = (
             "https://bst.cisco.com/bugsearch/bug/CSCwq57968"
@@ -1952,6 +1906,127 @@ def ping(host):
         return False
     except Exception as e:
         print("[ERROR] Ping reachability check failed: {0}".format(str(e)))
+        return False
+
+def check_nameserver_duplicates(tech_file):
+    """
+    Check for duplicate nameservers in acs_system_config
+    
+    Validates that all nameservers configured in the Nexus Dashboard are unique.
+    Duplicate nameserver entries can cause upgrade failures.
+    """
+    print_section("Checking for Duplicate Nameservers on {0}".format(NODE_NAME))
+    update_status("running", "Checking nameserver configuration", 93)
+    
+    node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
+    
+    # Use file cache for faster file discovery
+    cache = get_file_cache()
+    
+    # Find acs_system_config file
+    config_pattern = "acs-checks/acs_system_config"
+    config_files = cache.find_files(config_pattern)
+    
+    # Also try wildcard pattern in case file is in subdirectories
+    if not config_files:
+        wildcard_patterns = [
+            "*/acs-checks/acs_system_config",
+            "**/acs_system_config"
+        ]
+        for pattern in wildcard_patterns:
+            config_files = cache.find_files(pattern)
+            if config_files:
+                break
+    
+    if not config_files:
+        print("[WARNING] acs_system_config file not found in tech support")
+        results["checks"]["nameserver_duplicate_check"]["status"] = "WARNING"
+        results["checks"]["nameserver_duplicate_check"]["details"] = [
+            "Could not locate acs_system_config file in tech support"
+        ]
+        return False
+    
+    # Use the first found config file
+    config_file = config_files[0]
+    print("Parsing acs_system_config: {0}".format(os.path.basename(config_file)))
+    
+    try:
+        # Read and parse the YAML file
+        with open(config_file, 'r') as f:
+            content = f.read()
+        
+        # Parse YAML to get nameServers list
+        import yaml
+        config_data = yaml.safe_load(content)
+        
+        if not config_data or 'nameServers' not in config_data:
+            print("[WARNING] No nameServers section found in acs_system_config")
+            results["checks"]["nameserver_duplicate_check"]["status"] = "WARNING"
+            results["checks"]["nameserver_duplicate_check"]["details"] = [
+                "No nameServers configuration found in acs_system_config"
+            ]
+            return False
+        
+        nameservers = config_data['nameServers']
+        
+        if not nameservers or not isinstance(nameservers, list):
+            print("[WARNING] nameServers is empty or not a list")
+            results["checks"]["nameserver_duplicate_check"]["status"] = "WARNING"
+            results["checks"]["nameserver_duplicate_check"]["details"] = [
+                "nameServers configuration is empty or invalid"
+            ]
+            return False
+        
+        print("Found {0} nameserver(s) configured: {1}".format(len(nameservers), ", ".join(str(ns) for ns in nameservers)))
+        
+        # Check for duplicates
+        seen = set()
+        duplicates = set()
+        for ns in nameservers:
+            ns_str = str(ns).strip()
+            if ns_str in seen:
+                duplicates.add(ns_str)
+            seen.add(ns_str)
+        
+        if duplicates:
+            # Found duplicates - FAIL
+            print("[FAIL] Duplicate nameservers found: {0}".format(", ".join(duplicates)))
+            results["checks"]["nameserver_duplicate_check"]["status"] = "FAIL"
+            results["checks"]["nameserver_duplicate_check"]["details"] = [
+                "Duplicate nameservers found: {0}".format(", ".join(duplicates))
+            ]
+            results["checks"]["nameserver_duplicate_check"]["explanation"] = (
+                "Duplicate nameserver configuration will result in upgrade failure."
+            )
+            # Multi-line recommendation for better readability
+            results["checks"]["nameserver_duplicate_check"]["recommendation"] = (
+                "1. Remove the duplicated nameserver and confirm only unique nameservers exist.\n  "
+                "2. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  "
+                "3. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
+            )
+            return False
+        else:
+            # No duplicates - PASS
+            print("[PASS] No duplicate nameservers found")
+            results["checks"]["nameserver_duplicate_check"]["status"] = "PASS"
+            results["checks"]["nameserver_duplicate_check"]["details"] = [
+                "No duplicate nameservers found"
+            ]
+            return True
+    
+    except yaml.YAMLError as e:
+        print("[ERROR] Failed to parse acs_system_config YAML: {0}".format(str(e)))
+        results["checks"]["nameserver_duplicate_check"]["status"] = "WARNING"
+        results["checks"]["nameserver_duplicate_check"]["details"] = [
+            "Failed to parse acs_system_config: {0}".format(str(e))
+        ]
+        return False
+    except Exception as e:
+        print("[ERROR] Error checking nameserver duplicates: {0}".format(str(e)))
+        results["checks"]["nameserver_duplicate_check"]["status"] = "WARNING"
+        results["checks"]["nameserver_duplicate_check"]["details"] = [
+            "Error checking nameserver configuration: {0}".format(str(e))
+        ]
         return False
 
 def check_ping_reachability():
@@ -2029,7 +2104,7 @@ def check_ping_reachability():
         
         # Add explanation and recommendation for ping failures
         explanation = "  Explanation:\n  Network reachability must be in place between Nexus Dashboard nodes to ensure a successful upgrade."
-        recommendation = "  Recommendation:\n  Debug connectivity issues between any affected nodes and contact Cisco TAC for\n  assistance if needed."
+        recommendation = "  Recommendation:\n  Debug connectivity issues between any affected nodes and contact Cisco TAC for\n  assistance if required."
         
         # First add the specific ping failures
         results["checks"]["ping_check"]["details"] = failed_pings.copy()
@@ -2054,8 +2129,25 @@ def check_CA_CSCwm35992(tech_file):
     search_string = "a valid config key must consist of alphanumeric characters"
     matches = []
     node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
+    files_found = False
     
-    # OPTIMIZATION: Use file cache instead of find command - 60% faster than repeated find calls
+    # Helper function to set WARNING status with consistent message
+    def set_warning_status(reason, details_msg):
+        print("[WARNING] {0}".format(reason))
+        results["checks"]["certificate_check"]["status"] = "WARNING"
+        results["checks"]["certificate_check"]["details"] = [details_msg]
+        results["checks"]["certificate_check"]["explanation"] = "Certificate names with spaces are not supported."
+        results["checks"]["certificate_check"]["recommendation"] = (
+            "1. If any CA certificate has been added under Admin > Security > Certificate Authorities\n"
+            "     verify that there are no spaces in the name.\n"
+            "     If there are spaces in the name, re-add it using a name that does not contain spaces.\n"
+            "  2. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n"
+            "  3. If further clarification is required, contact Cisco TAC for assistance in verification/remediation."
+        )
+        results["checks"]["certificate_check"]["reference"] = "https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwm35992"
+        return False
+    
+    # Use file cache instead of find command - 60% faster than repeated find calls
     cache = get_file_cache()
     sm_log_files = cache.find_files("sm.log*")
     
@@ -2065,7 +2157,6 @@ def check_CA_CSCwm35992(tech_file):
     
     if sm_log_files:
         files_found = True
-        sm_log_files_found = True
         print("Found {0} SM log files in extracted tech support".format(len(sm_log_files)))
         
         # Use a single unified command to search all SM log files at once
@@ -2085,21 +2176,18 @@ def check_CA_CSCwm35992(tech_file):
         
         if sm_dirs:
             files_found = True
-            print("Logs directory exists but contains no SM logs")
-            print("Found SM directories but no log files: {0}".format(sm_dirs))
-            
-            results["checks"]["certificate_check"]["status"] = "WARNING"
-            results["checks"]["certificate_check"]["details"] = ["Found SM directories but no log files to analyze"]
-            return False
+            return set_warning_status(
+                "Logs directory exists but contains no SM logs",
+                "Found SM directories but no log files to analyze"
+            )
         else:
             # Verify if tech support was properly extracted by checking for common directories
             if os.path.exists("{0}/logs".format(node_dir)) or os.path.exists("{0}/logs/k8_infra".format(node_dir)):
                 files_found = True
-                print("Logs directory exists but contains no SM directories or logs")
-                
-                results["checks"]["certificate_check"]["status"] = "WARNING"
-                results["checks"]["certificate_check"]["details"] = ["Found logs directory but no SM log files"]
-                return False
+                return set_warning_status(
+                    "Logs directory exists but contains no SM directories or logs",
+                    "Found logs directory but no SM log files"
+                )
             else:
                 # Verify if tech support was properly extracted at all
                 common_dirs = ["systeminfo", "logs", "k8-diag", "storage-diag"]
@@ -2110,11 +2198,10 @@ def check_CA_CSCwm35992(tech_file):
                 
                 if extracted_dirs:
                     files_found = True
-                    print("Tech support was extracted but is missing logs/k8_infra directory")
-                    
-                    results["checks"]["certificate_check"]["status"] = "WARNING"
-                    results["checks"]["certificate_check"]["details"] = ["Tech support is missing logs/k8_infra directory"]
-                    return False
+                    return set_warning_status(
+                        "Tech support was extracted but is missing logs/k8_infra directory",
+                        "Tech support is missing logs/k8_infra directory"
+                    )
                 else:
                     print("Tech support extraction appears incomplete or failed")
     
@@ -2149,15 +2236,19 @@ def check_CA_CSCwm35992(tech_file):
         error_lines = first_match.strip().split('\n')
         indented_error = "\n    ".join(error_lines)  # 4 spaces for alignment with Details column
         
-        # STORE ONLY THE SPECIFIC ERROR IN DETAILS
+        # Store only the specific error message in details
         results["checks"]["certificate_check"]["status"] = "FAIL"  
         results["checks"]["certificate_check"]["details"] = [
             "Certificate name validation error detected: \n\n    {0}".format(indented_error)
         ]
         
-        # ADD THE EXPLANATION AND RECOMMENDATION AT THE TOP LEVEL
+        # Add the explanation and recommendation
         results["checks"]["certificate_check"]["explanation"] = "Certificate names with spaces are not supported."
-        results["checks"]["certificate_check"]["recommendation"] = "Prior to upgrading, remove this CA certificate and re-add it with a name\n  without spaces."
+        results["checks"]["certificate_check"]["recommendation"] = (
+            "1. Remove this CA certificate and re-add it using a name that does not contain spaces.\n"
+            "  2. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n"
+            "  3. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
+        )
         results["checks"]["certificate_check"]["reference"] = "https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwm35992"
         
         return True
@@ -2173,7 +2264,7 @@ def check_ISOs_CSCwn94394(tech_file):
     matches = []
     node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
     
-    # OPTIMIZATION: Use file cache for faster file discovery
+    # Use file cache for faster file discovery
     cache = get_file_cache()
     boot_hook_files = cache.find_files("boot-hook*")
     
@@ -2260,7 +2351,7 @@ def check_ISOs_CSCwn94394(tech_file):
             match_lines = first_match.strip().split('\n')
             match_formatted = "\n    ".join(match_lines)
             
-            # ONLY INCLUDE SPECIFIC ERROR DETAILS IN THE DETAILS ARRAY
+            # Include specific error details in the array
             combined_detail = "Multiple ISOs in boot-hook detected: \n\n    {0}\n\n    Multiple ISOs found:\n    {1}".format(match_formatted, iso_list_formatted)
             results["checks"]["iso_check"]["details"] = [combined_detail]
         else:
@@ -2268,12 +2359,12 @@ def check_ISOs_CSCwn94394(tech_file):
             match_lines = first_match.strip().split('\n')
             match_formatted = "\n    ".join(match_lines)
             
-            # ONLY INCLUDE SPECIFIC ERROR DETAILS IN THE DETAILS ARRAY
+            # Include specific error details in the array
             results["checks"]["iso_check"]["details"] = [
                 "Multiple ISOs in boot-hook detected: \n\n    {0}".format(match_formatted)
             ]
         
-        # ADD EXPLANATION AND RECOMMENDATION AT THE TOP LEVEL
+        # Add explanation and recommendation at the top level
         results["checks"]["iso_check"]["explanation"] = "Only one ISO can be in the firmware directory on the running ND version."
         results["checks"]["iso_check"]["recommendation"] = "Contact TAC for assistance in removing the unneeded ISO images."
         results["checks"]["iso_check"]["reference"] = "https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwn94394"
@@ -2294,7 +2385,7 @@ def check_lvm_pvs(tech_file):
     
     node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
     
-    # OPTIMIZATION: Use file cache instead of find command
+    # Use file cache instead of find command
     cache = get_file_cache()
     lvm_pvs_files = cache.find_files("lvm-pvs")
     
@@ -2393,7 +2484,7 @@ def check_persistent_ip_config(tech_file):
     
     node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
     
-    # OPTIMIZATION: Use file cache for faster file discovery
+    # Use file cache for faster file discovery
     cache = get_file_cache()
     
     # Try both possible external IP config file paths
@@ -2439,7 +2530,7 @@ def check_persistent_ip_config(tech_file):
             "This could indicate no persistent IPs are configured, or the tech support is incomplete."
         )
         results["checks"]["persistent_ip_check"]["recommendation"] = (
-            "Verify that persistent IP addresses are properly configured before proceeding with upgrade."
+            "Verify that at least 5 persistent IP addresses are properly configured before proceeding with upgrade."
         )
         results["checks"]["persistent_ip_check"]["reference"] = (
             "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
@@ -2476,7 +2567,7 @@ def check_persistent_ip_config(tech_file):
                 "The Persistent IP configuration file exists but does not contain the expected YAML structure."
             )
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "Verify that persistent IP addresses are properly configured and generate a new tech support.\n  "
+                "Verify that at least 5 persistent IP addresses are properly configured before proceeding with upgrade.\n  "
                 "Check the Nexus Dashboard configuration for external IP settings."
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
@@ -2485,7 +2576,7 @@ def check_persistent_ip_config(tech_file):
             )
             return False
         
-        # OPTIMIZATION: Stream processing to handle large config files efficiently
+        # Stream processing to handle large config files efficiently
         with open(config_file, 'r') as f:
             in_external_ip_section = False
             current_config = {}
@@ -2569,8 +2660,10 @@ def check_persistent_ip_config(tech_file):
                 "This will likely result in upgrade failure as persistent IPs are required for data services."
             )
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
-                "Consult the Nexus Dashboard deployment guide for proper persistent IP configuration."
+                "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+                "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
+                "3. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  "
+                "4. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
                 "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
@@ -2595,8 +2688,10 @@ def check_persistent_ip_config(tech_file):
                 "which is less than the required minimum of 5. This will likely result in upgrade failure.".format(data_external_ips)
             )
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "Add additional persistent IP addresses to data-external-services configuration to reach\n  "
-                "the minimum requirement of 5 IPs before attempting upgrade."
+                "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+                "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
+                "3. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  "
+                "4. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
                 "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
@@ -2612,8 +2707,9 @@ def check_persistent_ip_config(tech_file):
         # Add common fields for WARNING cases only (FAIL cases have specific recommendations above)
         if results["checks"]["persistent_ip_check"]["status"] in ["WARN", "WARNING"]:
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "Verify that persistent IP addresses are properly configured and generate a new tech support. "
-                "Check the Nexus Dashboard configuration for external IP settings."
+                "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+                "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
+                "3. Contact Cisco TAC for assistance in verification/remediation if required."
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
                 "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
@@ -2631,7 +2727,9 @@ def check_persistent_ip_config(tech_file):
             "Could not determine persistent IP configuration due to parsing error"
         )
         results["checks"]["persistent_ip_check"]["recommendation"] = (
-            "Check if the tech support file is complete and valid. Generate a new tech support if needed."
+            "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+            "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
+            "3. Contact Cisco TAC for assistance in verification/remediation if required."
         )
         return False
     
@@ -2733,7 +2831,7 @@ def check_atom0_nvme(tech_file):
             "NVME drive operability needs to be confirmed to ensure successful upgrade."
         )
         results["checks"]["atom0_nvme_check"]["recommendation"] = (
-            "Verify NVME drive health in CIMC or contact Cisco TAC for assistance."
+            "Verify NVME drive health in CIMC or contact Cisco TAC for assistance if required."
         )
         return False
     
@@ -2793,7 +2891,7 @@ def check_atom0_nvme(tech_file):
             "NVME drive operability needs to be confirmed to ensure successful upgrade."
         )
         results["checks"]["atom0_nvme_check"]["recommendation"] = (
-            "Verify NVME drive health in CIMC or contact Cisco TAC for assistance."
+            "Verify NVME drive health in CIMC or contact Cisco TAC for assistance if required."
         )
         return False
     
@@ -2818,7 +2916,7 @@ def check_atom0_nvme(tech_file):
             "NVME drive operability needs to be confirmed to ensure successful upgrade."
         )
         results["checks"]["atom0_nvme_check"]["recommendation"] = (
-            "Verify NVME drive health in CIMC or contact Cisco TAC for assistance."
+            "Verify NVME drive health in CIMC or contact Cisco TAC for assistance if required."
         )
         return False
     
@@ -2856,7 +2954,7 @@ def check_atom0_vg(tech_file):
     
     node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
     
-    # OPTIMIZATION: Use file cache for faster file discovery
+    # Use file cache for faster file discovery
     cache = get_file_cache()
     
     # Step 1: Check ND version - bypass check for 4.1.1g and later
@@ -3040,7 +3138,7 @@ def get_techsupport_command(nd_version=None):
         if len(version_parts) >= 1:
             major = int(version_parts[0])
             
-            # Simple logic: version 4.x and later use new command
+            # version 4.x and later use new command
             if major >= 4:
                 print("ND version {0} >= 4.x, using new command format".format(nd_version))
                 return "acs techsupport collect"
@@ -3340,7 +3438,7 @@ def extract_techsupport_optimized(tech_file, node_dir):
             except (ValueError, IndexError):
                 pass  # Continue anyway if space check fails
     
-    # OPTIMIZATION 1: Single-command extraction with proper error handling
+    # 1: Single-command extraction with error handling
     print("Extracting tech support (optimized path)...")
     extract_cmd = "cd {0} && tar -xzf {1} 2>/dev/null || tar -xf {1}".format(node_dir, tech_file)
     
@@ -3355,14 +3453,14 @@ def extract_techsupport_optimized(tech_file, node_dir):
         if returncode != 0:
             raise Exception("All extraction methods failed: {0}".format(stderr))
     
-    # OPTIMIZATION 2: Check for nested logs.tgz and extract if present
+    # 2: Check for nested logs.tgz and extract if present
     logs_path = "{0}/logs.tgz".format(node_dir)
     if os.path.exists(logs_path):
         print("Extracting nested logs.tgz...")
         logs_cmd = "cd {0} && tar -xzf logs.tgz 2>/dev/null || tar -xf logs.tgz".format(node_dir)
         run_command_unified(logs_cmd, timeout=600)  # Shorter timeout for logs
     
-    # OPTIMIZATION 3: Initialize file cache after extraction
+    # 3: Initialize file cache after extraction
     print("Building optimized file cache...")
     cache = FileCache(node_dir)
     
@@ -3772,6 +3870,13 @@ def main():
                 print("[ERROR] Backup failure check failed: {0}".format(str(e)))
                 results["checks"]["backup_failure_check"]["status"] = "FAIL"
                 results["checks"]["backup_failure_check"]["details"] = ["Check failed: {0}".format(str(e))]
+                
+            try:
+                check_nameserver_duplicates(dest_path)
+            except Exception as e:
+                print("[ERROR] Nameserver duplicate check failed: {0}".format(str(e)))
+                results["checks"]["nameserver_duplicate_check"]["status"] = "FAIL"
+                results["checks"]["nameserver_duplicate_check"]["details"] = ["Check failed: {0}".format(str(e))]
                 
             try:
                 check_CA_CSCwm35992(dest_path)
