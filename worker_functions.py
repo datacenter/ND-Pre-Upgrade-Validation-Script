@@ -70,7 +70,8 @@ results = {
         "atom0_vg_check": {"status": "PASS", "details": []},  # atom0 virtual group space check
         "nxos_discovery_service": {"status": "PASS", "details": []},  # NXOS Discovery Service check CSCwm97680
         "backup_failure_check": {"status": "PASS", "details": []},  # Backup job failure check CSCwq57968/CSCwm96512
-        "nameserver_duplicate_check": {"status": "PASS", "details": []}  # Duplicate nameserver configuration check
+        "nameserver_duplicate_check": {"status": "PASS", "details": []},  # Duplicate nameserver configuration check
+        "legacy_ndi_elasticsearch_check": {"status": "PASS", "details": []}  # Legacy NDI ElasticSearch check CSCwr43810
     }
 }
 
@@ -2029,6 +2030,169 @@ def check_nameserver_duplicates(tech_file):
         ]
         return False
 
+def check_legacy_ndi_elasticsearch(tech_file):
+    """
+    Check for Legacy NDI ElasticSearch volumes (CSCwr43810)
+    
+    If NDI was deployed before version 2.2.x, ElasticSearch volumes can fail to 
+    migrate to new OpenSearch format. This problematic volume will cause upgrade 
+    to 4.1 and later to fail.
+    
+    This check:
+    1. Verifies ND version is 3.2 or later
+    2. Checks if desiredDeploymentMode contains "ndi" (if yes, skip check)
+    3. Searches for "elasticsearch.nir" string in lvm-lvs output
+    
+    Reference: CSCwr43810
+    """
+    print_section("Checking for Legacy NDI ElasticSearch on {0}".format(NODE_NAME))
+    update_status("running", "Checking Legacy NDI ElasticSearch", 99)
+    
+    node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
+    
+    # Use file cache for faster file discovery
+    cache = get_file_cache()
+    
+    # Helper function to set WARNING status with consistent message
+    def set_warning_status():
+        print("[WARNING] Unable to validate NDI ElasticSearch LVM")
+        results["checks"]["legacy_ndi_elasticsearch_check"]["status"] = "WARNING"
+        results["checks"]["legacy_ndi_elasticsearch_check"]["details"] = [
+            "Unable to validate NDI ElasticSearch LVM"
+        ]
+        return False
+    
+    # Step 1: Check ND version - this check only applies to ND 3.2 and later
+    version_files = cache.find_files("acs-checks/acs_version")
+    if not version_files:
+        return set_warning_status()
+    
+    version_file = version_files[0]
+    nd_version = None
+    try:
+        with open(version_file, 'r') as f:
+            version_line = f.read().strip()
+            # Extract version (e.g., "Nexus Dashboard 3.2.1e" -> "3.2.1e")
+            if "Nexus Dashboard" in version_line:
+                nd_version = version_line.split("Nexus Dashboard")[1].strip()
+            else:
+                nd_version = version_line
+            print("ND Version: {0}".format(nd_version))
+    except Exception as e:
+        print("[WARNING] Error reading version file: {0}".format(str(e)))
+        return set_warning_status()
+    
+    # Parse version to check if < 3.2
+    if nd_version:
+        try:
+            version_parts = nd_version.split('.')
+            if len(version_parts) >= 2:
+                major = int(version_parts[0])
+                minor = int(version_parts[1])
+                
+                # Check if version < 3.2
+                if major < 3 or (major == 3 and minor < 2):
+                    print("[PASS] ND version {0} < 3.2 - Legacy NDI ElasticSearch check not applicable".format(nd_version))
+                    results["checks"]["legacy_ndi_elasticsearch_check"]["status"] = "PASS"
+                    results["checks"]["legacy_ndi_elasticsearch_check"]["details"] = [
+                        "Version below 3.2, check not applicable"
+                    ]
+                    return True
+                else:
+                    print("ND version {0} >= 3.2 - proceeding with Legacy NDI ElasticSearch check".format(nd_version))
+        except (ValueError, IndexError) as e:
+            print("[WARNING] Could not parse version for version check: {0}".format(str(e)))
+            # If we can't parse the version, continue with the check to be safe
+    
+    # Step 2: Check k8-releases.yaml for desiredDeploymentMode
+    k8_releases_files = cache.find_files("k8-diag/kubectl/k8-releases.yaml")
+    
+    if not k8_releases_files:
+        print("[WARNING] k8-releases.yaml file not found in tech support")
+        return set_warning_status()
+    
+    k8_releases_file = k8_releases_files[0]
+    print("Found k8-releases.yaml: {0}".format(k8_releases_file))
+    
+    # Read the file and check for desiredDeploymentMode
+    deployment_mode = None
+    try:
+        with open(k8_releases_file, 'r') as f:
+            for line in f:
+                if 'desiredDeploymentMode' in line:
+                    # Extract the value after the colon
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        deployment_mode = parts[1].strip()
+                        print("Found desiredDeploymentMode: {0}".format(deployment_mode))
+                        break
+    except Exception as e:
+        print("[WARNING] Error reading k8-releases.yaml: {0}".format(str(e)))
+        return set_warning_status()
+    
+    # Check if we found deployment mode
+    if not deployment_mode:
+        print("[WARNING] desiredDeploymentMode not found in k8-releases.yaml")
+        return set_warning_status()
+    
+    # Step 1a: If deployment mode contains "ndi", check is not applicable
+    if "ndi" in deployment_mode.lower():
+        print("[PASS] Deployment mode contains NDI ({0}), check not applicable".format(deployment_mode))
+        results["checks"]["legacy_ndi_elasticsearch_check"]["status"] = "PASS"
+        results["checks"]["legacy_ndi_elasticsearch_check"]["details"] = [
+            "Deployment mode contains NDI, check not applicable"
+        ]
+        return True
+    
+    # Step 2: Check lvm-lvs for elasticsearch.nir
+    print("Deployment mode '{0}' does not contain 'ndi', checking lvm-lvs...".format(deployment_mode))
+    lvm_lvs_files = cache.find_files("lvm-lvs")
+    
+    if not lvm_lvs_files:
+        print("[WARNING] lvm-lvs file not found in tech support")
+        return set_warning_status()
+    
+    lvm_lvs_file = lvm_lvs_files[0]
+    print("Found lvm-lvs: {0}".format(lvm_lvs_file))
+    
+    # Search for "elasticsearch.nir" in the file (flexible detection)
+    elasticsearch_nir_found = False
+    try:
+        with open(lvm_lvs_file, 'r') as f:
+            for line in f:
+                if "elasticsearch.nir" in line:
+                    elasticsearch_nir_found = True
+                    print("Found 'elasticsearch.nir' in lvm-lvs: {0}".format(line.strip()))
+                    break
+    except Exception as e:
+        print("[WARNING] Error reading lvm-lvs file: {0}".format(str(e)))
+        return set_warning_status()
+    
+    # Step 2a: If elasticsearch.nir is detected, this is a FAIL
+    if elasticsearch_nir_found:
+        print("[FAIL] Legacy NDI ElasticSearch volume detected")
+        results["checks"]["legacy_ndi_elasticsearch_check"]["status"] = "FAIL"
+        results["checks"]["legacy_ndi_elasticsearch_check"]["details"] = [
+            "Legacy NDI ElasticSearch volume detected"
+        ]
+        results["checks"]["legacy_ndi_elasticsearch_check"]["explanation"] = (
+            "If NDI was deployed before version 2.2.x, ElasticSearch volumes can fail to migrate to new OpenSearch format.\n"
+            "  This problematic volume will cause upgrade to 4.1 and later to fail."
+        )
+        results["checks"]["legacy_ndi_elasticsearch_check"]["recommendation"] = (
+            "Contact Cisco TAC for help in remediation before proceeding with upgrade."
+        )
+        results["checks"]["legacy_ndi_elasticsearch_check"]["reference"] = "https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwr43810"
+        return False
+    
+    # Step 2b: No elasticsearch.nir found, this is a PASS
+    print("[PASS] No Legacy NDI ElasticSearch volume detected")
+    results["checks"]["legacy_ndi_elasticsearch_check"]["status"] = "PASS"
+    results["checks"]["legacy_ndi_elasticsearch_check"]["details"] = [
+        "No Legacy NDI ElasticSearch volume detected"
+    ]
+    return True
+
 def check_ping_reachability():
     """Check if nodes can ping each other"""
     print_section("Checking Node Reachability on {0}".format(NODE_NAME))
@@ -3877,6 +4041,13 @@ def main():
                 print("[ERROR] Nameserver duplicate check failed: {0}".format(str(e)))
                 results["checks"]["nameserver_duplicate_check"]["status"] = "FAIL"
                 results["checks"]["nameserver_duplicate_check"]["details"] = ["Check failed: {0}".format(str(e))]
+                
+            try:
+                check_legacy_ndi_elasticsearch(dest_path)
+            except Exception as e:
+                print("[ERROR] Legacy NDI ElasticSearch check failed: {0}".format(str(e)))
+                results["checks"]["legacy_ndi_elasticsearch_check"]["status"] = "FAIL"
+                results["checks"]["legacy_ndi_elasticsearch_check"]["details"] = ["Check failed: {0}".format(str(e))]
                 
             try:
                 check_CA_CSCwm35992(dest_path)

@@ -8,7 +8,7 @@ This script performs health checks on a Nexus Dashboard cluster:
 - Results are aggregated at the end for a comprehensive report
 
 Author: joelebla@cisco.com
-Version: 1.0.3 (Nov 6, 2025)
+Version: 1.0.4 (Nov 16, 2025)
 """
 
 import re
@@ -3000,6 +3000,7 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
             "nxos_discovery_service",
             "backup_failure_check",
             "nameserver_duplicate_check",
+            "legacy_ndi_elasticsearch_check",
             "certificate_check",
             "iso_check",
             "lvm_pvs_check",
