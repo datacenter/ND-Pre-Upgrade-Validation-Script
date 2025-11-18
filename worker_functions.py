@@ -71,7 +71,8 @@ results = {
         "nxos_discovery_service": {"status": "PASS", "details": []},  # NXOS Discovery Service check CSCwm97680
         "backup_failure_check": {"status": "PASS", "details": []},  # Backup job failure check CSCwq57968/CSCwm96512
         "nameserver_duplicate_check": {"status": "PASS", "details": []},  # Duplicate nameserver configuration check
-        "legacy_ndi_elasticsearch_check": {"status": "PASS", "details": []}  # Legacy NDI ElasticSearch check CSCwr43810
+        "legacy_ndi_elasticsearch_check": {"status": "PASS", "details": []},  # Legacy NDI ElasticSearch check CSCwr43810
+        "ntp_auth_check": {"status": "PASS", "details": []}  # NTP Authentication check CSCwr97181
     }
 }
 
@@ -2193,6 +2194,292 @@ def check_legacy_ndi_elasticsearch(tech_file):
     ]
     return True
 
+def check_ntp_authentication(tech_file):
+    """
+    Check for NTP Authentication enabled on remote NTP servers (CSCwr97181)
+    
+    If NTP authentication is configured on the remote NTP server, upgrade from
+    3.2.x to 4.1 or later will fail.
+    
+    This check:
+    1. Verifies ND version is 3.2 or later (if not, check is not applicable)
+    2. Reads the network-diag/ntpq-peers file
+    3. Parses the auth column in the top table
+    4. If any entry contains "yes" or "ok", the check fails
+    5. If all entries contain "no" or "none", the check passes
+    
+    Reference: CSCwr97181
+    """
+    print_section("Checking NTP Authentication on {0}".format(NODE_NAME))
+    update_status("running", "Checking NTP Authentication", 95)
+    
+    node_dir = "{0}/{1}".format(BASE_DIR, NODE_NAME)
+    
+    # Use file cache for faster file discovery
+    cache = get_file_cache()
+    
+    # Step 1: Check ND version - this check only applies to ND 3.2 and later
+    version_files = cache.find_files("acs-checks/acs_version")
+    if not version_files:
+        print("[WARNING] acs_version file not found in tech support")
+        results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+        results["checks"]["ntp_auth_check"]["details"] = [
+            "Unable to determine ND version"
+        ]
+        return False
+    
+    version_file = version_files[0]
+    nd_version = None
+    try:
+        with open(version_file, 'r') as f:
+            version_line = f.read().strip()
+            # Extract version (e.g., "Nexus Dashboard 3.2.1e" -> "3.2.1e")
+            if "Nexus Dashboard" in version_line:
+                nd_version = version_line.split("Nexus Dashboard")[1].strip()
+            else:
+                nd_version = version_line
+            print("ND Version: {0}".format(nd_version))
+    except Exception as e:
+        print("[WARNING] Error reading version file: {0}".format(str(e)))
+        results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+        results["checks"]["ntp_auth_check"]["details"] = [
+            "Unable to determine ND version"
+        ]
+        return False
+    
+    # Parse version to check if < 3.2
+    if nd_version:
+        try:
+            version_parts = nd_version.split('.')
+            if len(version_parts) >= 2:
+                major = int(version_parts[0])
+                minor = int(version_parts[1])
+                
+                # Check if version < 3.2
+                if major < 3 or (major == 3 and minor < 2):
+                    print("[PASS] ND version {0} < 3.2 - NTP Authentication check not applicable".format(nd_version))
+                    results["checks"]["ntp_auth_check"]["status"] = "PASS"
+                    results["checks"]["ntp_auth_check"]["details"] = [
+                        "Version below 3.2, check not applicable"
+                    ]
+                    return True
+                else:
+                    print("ND version {0} >= 3.2 - proceeding with NTP Authentication check".format(nd_version))
+        except (ValueError, IndexError) as e:
+            print("[WARNING] Could not parse version for version check: {0}".format(str(e)))
+            # If we can't parse the version, continue with the check to be safe
+    
+    # Step 2: Find ntpq-peers file
+    ntpq_pattern = "network-diag/ntpq-peers"
+    ntpq_files = cache.find_files(ntpq_pattern)
+    
+    # Also try wildcard pattern in case file is in subdirectories
+    if not ntpq_files:
+        wildcard_patterns = [
+            "*/network-diag/ntpq-peers",
+            "**/ntpq-peers"
+        ]
+        for pattern in wildcard_patterns:
+            ntpq_files = cache.find_files(pattern)
+            if ntpq_files:
+                break
+    
+    if not ntpq_files:
+        print("[WARNING] ntpq-peers file not found in tech support")
+        results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+        results["checks"]["ntp_auth_check"]["details"] = [
+            "ntpq-peers file not found in the tech support"
+        ]
+        return False
+    
+    # Use the first found ntpq-peers file
+    ntpq_file = ntpq_files[0]
+    print("Parsing ntpq-peers: {0}".format(os.path.basename(ntpq_file)))
+    
+    try:
+        # Read the file
+        with open(ntpq_file, 'r') as f:
+            content = f.read()
+        
+        # Split into lines
+        lines = content.strip().split('\n')
+        
+        if len(lines) < 3:
+            print("[WARNING] ntpq-peers file is too short or malformed")
+            results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+            results["checks"]["ntp_auth_check"]["details"] = [
+                "ntpq-peers file appears to be malformed or empty"
+            ]
+            return False
+        
+        # Find the header line (should contain 'ind assid status conf reach auth condition')
+        header_idx = -1
+        for i, line in enumerate(lines):
+            if 'auth' in line.lower() and 'condition' in line.lower():
+                header_idx = i
+                break
+        
+        if header_idx == -1:
+            print("[WARNING] Could not find header line with 'auth' column in ntpq-peers")
+            results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+            results["checks"]["ntp_auth_check"]["details"] = [
+                "Could not parse ntpq-peers file - header line not found"
+            ]
+            return False
+        
+        # Find the separator line (should be all '=' characters)
+        separator_idx = -1
+        for i in range(header_idx + 1, len(lines)):
+            if lines[i].strip().startswith('==='):
+                separator_idx = i
+                break
+        
+        if separator_idx == -1:
+            print("[WARNING] Could not find separator line in ntpq-peers")
+            results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+            results["checks"]["ntp_auth_check"]["details"] = [
+                "Could not parse ntpq-peers file - separator line not found"
+            ]
+            return False
+        
+        # Parse the header to find auth column position
+        header = lines[header_idx]
+        header_parts = header.split()
+        
+        try:
+            auth_col_idx = header_parts.index('auth')
+        except ValueError:
+            print("[WARNING] 'auth' column not found in header")
+            results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+            results["checks"]["ntp_auth_check"]["details"] = [
+                "Could not locate 'auth' column in ntpq-peers header"
+            ]
+            return False
+        
+        # Extract the top table (between separator and empty line or second table)
+        top_table_lines = []
+        top_table_start = separator_idx + 1
+        top_table_end = len(lines)
+        
+        # Find where the top table ends (empty line or next table starts)
+        for i in range(top_table_start, len(lines)):
+            line = lines[i].strip()
+            if not line or line.startswith('remote') or line.startswith('==='):
+                top_table_end = i
+                break
+            top_table_lines.append(lines[i])
+        
+        if not top_table_lines:
+            print("[WARNING] No NTP peer data found in ntpq-peers")
+            results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+            results["checks"]["ntp_auth_check"]["details"] = [
+                "No NTP peer data found in ntpq-peers file"
+            ]
+            return False
+        
+        # Check auth column for each data line and track indices with auth enabled
+        auth_enabled = False
+        auth_enabled_indices = []  # Track which indices (0-based) have auth enabled
+        
+        for idx, line in enumerate(top_table_lines):
+            parts = line.split()
+            if len(parts) > auth_col_idx:
+                auth_value = parts[auth_col_idx].lower()
+                # Check for "yes" or "ok" (both indicate authentication is enabled/working)
+                if auth_value in ['yes', 'ok']:
+                    auth_enabled = True
+                    auth_enabled_indices.append(idx)
+        
+        if auth_enabled:
+            # FAIL - NTP authentication is enabled
+            print("[FAIL] NTP Authentication is ENABLED")
+            results["checks"]["ntp_auth_check"]["status"] = "FAIL"
+            
+            # Now find the bottom table (remote IPs table)
+            bottom_table_header_idx = -1
+            bottom_table_separator_idx = -1
+            bottom_table_lines = []
+            
+            # Find the bottom table header (contains "remote")
+            for i in range(top_table_end, len(lines)):
+                if 'remote' in lines[i].lower() and 'refid' in lines[i].lower():
+                    bottom_table_header_idx = i
+                    break
+            
+            if bottom_table_header_idx != -1:
+                # Find the separator for bottom table
+                for i in range(bottom_table_header_idx + 1, len(lines)):
+                    if lines[i].strip().startswith('==='):
+                        bottom_table_separator_idx = i
+                        break
+                
+                # Extract bottom table data lines
+                if bottom_table_separator_idx != -1:
+                    for i in range(bottom_table_separator_idx + 1, len(lines)):
+                        line = lines[i].strip()
+                        if not line:
+                            break
+                        bottom_table_lines.append(lines[i])
+            
+            # Build details with matching bottom table entries
+            details = ["NTP Authentication is ENABLED"]
+            details.append("")
+            
+            # If we successfully parsed the bottom table, show only matching entries
+            if bottom_table_lines and len(bottom_table_lines) >= len(top_table_lines):
+                details.append("NTP Servers with authentication enabled:")
+                if bottom_table_header_idx != -1 and bottom_table_separator_idx != -1:
+                    details.append(lines[bottom_table_header_idx])
+                    details.append(lines[bottom_table_separator_idx])
+                
+                # Add only the bottom table entries that correspond to auth-enabled top table entries
+                for idx in auth_enabled_indices:
+                    if idx < len(bottom_table_lines):
+                        details.append(bottom_table_lines[idx])
+            else:
+                # Fallback: if we can't parse bottom table, show the full top table
+                details.append("NTP Peers with authentication enabled:")
+                details.append(lines[header_idx])
+                details.append(lines[separator_idx])
+                for idx in auth_enabled_indices:
+                    if idx < len(top_table_lines):
+                        details.append(top_table_lines[idx])
+            
+            results["checks"]["ntp_auth_check"]["details"] = details
+            
+            results["checks"]["ntp_auth_check"]["explanation"] = (
+                "Due to a defect, if a configured NTP server has authentication enabled\n  "
+                "upgrade to Nexus Dashboard Version 4.1 or later will fail."
+            )
+            
+            results["checks"]["ntp_auth_check"]["recommendation"] = (
+                "Remove authentication requirements from the identified NTP servers,\n  "
+                "then rerun the ND Pre-upgrade Validation script to confirm this check passes.\n  "
+                "Alternatively, you can run the command `acs ntp` and confirm the \"auth\" column reports \"none\"." 
+            )
+            
+            results["checks"]["ntp_auth_check"]["reference"] = (
+                "https://bst.cloudapps.cisco.com/bugsearch/bug/CSCwr97181"
+            )
+            
+            return False
+        else:
+            # PASS - NTP authentication not enabled
+            print("[PASS] NTP Authentication not enabled")
+            results["checks"]["ntp_auth_check"]["status"] = "PASS"
+            results["checks"]["ntp_auth_check"]["details"] = [
+                "NTP Authentication not enabled"
+            ]
+            return True
+    
+    except Exception as e:
+        print("[ERROR] Error checking NTP authentication: {0}".format(str(e)))
+        results["checks"]["ntp_auth_check"]["status"] = "WARNING"
+        results["checks"]["ntp_auth_check"]["details"] = [
+            "Error checking NTP authentication: {0}".format(str(e))
+        ]
+        return False
+
 def check_ping_reachability():
     """Check if nodes can ping each other"""
     print_section("Checking Node Reachability on {0}".format(NODE_NAME))
@@ -4048,6 +4335,13 @@ def main():
                 print("[ERROR] Legacy NDI ElasticSearch check failed: {0}".format(str(e)))
                 results["checks"]["legacy_ndi_elasticsearch_check"]["status"] = "FAIL"
                 results["checks"]["legacy_ndi_elasticsearch_check"]["details"] = ["Check failed: {0}".format(str(e))]
+                
+            try:
+                check_ntp_authentication(dest_path)
+            except Exception as e:
+                print("[ERROR] NTP Authentication check failed: {0}".format(str(e)))
+                results["checks"]["ntp_auth_check"]["status"] = "FAIL"
+                results["checks"]["ntp_auth_check"]["details"] = ["Check failed: {0}".format(str(e))]
                 
             try:
                 check_CA_CSCwm35992(dest_path)
