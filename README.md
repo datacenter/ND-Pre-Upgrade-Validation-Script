@@ -4,7 +4,8 @@ The script checks for issues that are known to have an impact to the success of 
 
 The script can be run from any Linux server with the required dependencies. If ACI APICs are available and have connectivity towards the ND management address, the script can be run from an APIC as these devices already contain all dependencies required to run the script. The script **cannot** be run from the Nexus Dashboard itself.
 
-- The script can be run against any ND versions from Nexus Dashboard Version 2.1 and later
+- The script can be run against any ND versions starting from Version 2.1.
+- Due to a /tmp permissions discrepancy, running the script on 4.1.1g requires root access.
 - If you have feedback or are encountering an issue running the script, please send an email to nd-preupgrade-validation@cisco.com
 
 ## Table of Contents

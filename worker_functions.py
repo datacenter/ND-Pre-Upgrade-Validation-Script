@@ -6,7 +6,7 @@ This is a standalone script that runs on each node to perform validation checks.
 It is loaded and packaged by the main script at runtime.
 
 Author: joelebla@cisco.com
-Version: 2.0.0 (05/29/2025)
+Version: 1.0.7 (Nov 20, 2025)
 """
 
 # Future imports for Python 2/3 compatibility

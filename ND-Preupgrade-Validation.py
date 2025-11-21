@@ -8,7 +8,7 @@ This script performs health checks on a Nexus Dashboard cluster:
 - Results are aggregated at the end for a comprehensive report
 
 Author: joelebla@cisco.com
-Version: 1.0.5 (Nov 18, 2025)
+Version: 1.0.7 (Nov 20, 2025)
 """
 
 import re
@@ -740,6 +740,51 @@ class NDNodeManager:
             return False, [], error_msg
         except Exception as e:
             error_msg = f"Unexpected error checking disk space: {str(e)}"
+            logger.exception(f"{node['name']}: {error_msg}")
+            return False, [], error_msg
+    
+    def check_eventmonitoring_logs(self, node):
+        """
+        Check for large eventmonitoring log files (>= 1G).
+        This check is only performed for versions below 4.1.1.
+        Returns: (is_healthy, large_files, error_message)
+        
+        Args:
+            node: Node dictionary with 'name' and 'ip'
+        
+        Returns:
+            tuple: (bool, list, str) - (is_healthy, list of large file sizes, error_msg)
+        """
+        import subprocess
+        
+        try:
+            logger.info(f"Checking eventmonitoring logs on {node['name']}")
+            
+            # Check for files >= 1G in /logs/k8_infra/eventmonitoring
+            check_cmd = self.build_ssh_command(node['ip'], "ls -lh /logs/k8_infra/eventmonitoring | awk '{print $5}' | grep -E '^[0-9.]+G'")
+            process = subprocess.Popen(check_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate(timeout=30)
+            
+            # Parse output
+            output = stdout.decode('utf-8').strip()
+            
+            # If we got output, it means files >= 1G were found
+            if output:
+                large_files = [line.strip() for line in output.split('\n') if line.strip()]
+                error_msg = f"Found {len(large_files)} eventmonitoring log file(s) >= 1G"
+                logger.warning(f"{node['name']}: {error_msg}: {', '.join(large_files)}")
+                return False, large_files, error_msg
+            
+            # No large files found
+            logger.info(f"{node['name']}: No eventmonitoring log files >= 1G detected")
+            return True, [], ""
+            
+        except subprocess.TimeoutExpired:
+            error_msg = "Command timeout while checking eventmonitoring logs"
+            logger.error(f"{node['name']}: {error_msg}")
+            return False, [], error_msg
+        except Exception as e:
+            error_msg = f"Unexpected error checking eventmonitoring logs: {str(e)}"
             logger.exception(f"{node['name']}: {error_msg}")
             return False, [], error_msg
     
@@ -2543,7 +2588,7 @@ def process_all_nodes(node_manager, tech_choice, debug_mode=False, skipped_nodes
     
     # Initialize skipped_nodes_info if not provided
     if skipped_nodes_info is None:
-        skipped_nodes_info = {'disk_space_issues': []}
+        skipped_nodes_info = {'disk_space_issues': [], 'large_log_files': []}
     
     # Initialize result collections
     all_results = {}
@@ -2976,6 +3021,47 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
             print("")  # Add blank line
             summary_file.write("\n")
         
+        # Add skipped nodes section for large log files if there were any
+        if skipped_nodes_info and skipped_nodes_info.get('large_log_files'):
+            large_log_issues = skipped_nodes_info['large_log_files']
+            skipped_header = f"⚠️  NODES SKIPPED DUE TO LARGE EVENTMONITORING LOG FILES\n"
+            skipped_separator = "="*50 + "\n\n"
+            
+            print(skipped_header, end="")
+            print(skipped_separator, end="")
+            summary_file.write(skipped_header)
+            summary_file.write(skipped_separator)
+            
+            for issue in large_log_issues:
+                node = issue['node']
+                large_files = issue['large_files']
+                
+                node_info = f"Node: {node['name']} ({node['ip']})\n"
+                print(node_info, end="")
+                summary_file.write(node_info)
+                
+                if large_files:
+                    files_header = "Large eventmonitoring log files (>= 1G):\n"
+                    print(files_header, end="")
+                    summary_file.write(files_header)
+                    
+                    for file_size in large_files:
+                        file_info = f"  • {file_size}\n"
+                        print(file_info, end="")
+                        summary_file.write(file_info)
+                else:
+                    error_info = f"  • {issue['error']}\n"
+                    print(error_info, end="")
+                    summary_file.write(error_info)
+                
+                recommendation = f"Recommendation: Contact TAC to help resolve this issue before\n"
+                recommendation += f"                collecting tech support on {node['name']}\n\n"
+                print(recommendation, end="")
+                summary_file.write(recommendation)
+            
+            print("")  # Add blank line
+            summary_file.write("\n")
+        
         # Define check order and display formatting
         PASS = "\033[1;32mPASS\033[0m"
         FAIL = "\033[1;31mFAIL\033[0m"
@@ -3220,22 +3306,57 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
     import shutil
     import tarfile
     
+    # Get absolute paths to handle WSL/venv environments correctly
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    debug_log_src = os.path.join(script_dir, "nd_validation_debug.log")
+    cwd = os.getcwd()
+    
+    # Search for debug log in multiple possible locations (WSL/venv compatibility)
+    debug_log_search_paths = [
+        os.path.join(script_dir, "nd_validation_debug.log"),  # Script directory
+        os.path.join(cwd, "nd_validation_debug.log"),          # Current working directory
+        os.path.abspath("nd_validation_debug.log")             # Relative to CWD
+    ]
+    
+    debug_log_src = None
+    for path in debug_log_search_paths:
+        if os.path.exists(path):
+            debug_log_src = path
+            logger.info(f"Found debug log at: {debug_log_src}")
+            break
+    
+    # Copy (not move) debug log to final-results directory
+    # Using copy instead of move to ensure original remains if needed
     debug_log_dst = os.path.join(results_dir, "nd_validation_debug.log")
     
-    # Move debug log if it exists
-    if os.path.exists(debug_log_src):
+    if debug_log_src and os.path.exists(debug_log_src):
         try:
-            shutil.move(debug_log_src, debug_log_dst)
-            logger.info(f"Moved debug log to {debug_log_dst}")
+            shutil.copy2(debug_log_src, debug_log_dst)
+            logger.info(f"Copied debug log to {debug_log_dst}")
         except Exception as e:
-            logger.warning(f"Could not move debug log: {str(e)}")
+            logger.warning(f"Could not copy debug log: {str(e)}")
+            # Try to at least create a placeholder with error info
+            try:
+                with open(debug_log_dst, 'w') as f:
+                    f.write(f"Debug log could not be copied: {str(e)}\n")
+                    f.write(f"Searched in: {', '.join(debug_log_search_paths)}\n")
+            except:
+                pass
+    else:
+        logger.warning(f"Debug log not found in any of: {', '.join(debug_log_search_paths)}")
+        # Create a placeholder file to indicate the issue
+        try:
+            with open(debug_log_dst, 'w') as f:
+                f.write("Debug log file was not found at script execution.\n")
+                f.write(f"Searched in:\n")
+                for path in debug_log_search_paths:
+                    f.write(f"  - {path}\n")
+        except Exception as e:
+            logger.warning(f"Could not create placeholder debug log: {str(e)}")
     
     # Create timestamped .tgz bundle
     timestamp = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
     tgz_filename = f"nd-preupgrade-validation-results_{timestamp}.tgz"
-    tgz_path = os.path.join(os.getcwd(), tgz_filename)
+    tgz_path = os.path.join(cwd, tgz_filename)
     
     try:
         with tarfile.open(tgz_path, "w:gz") as tar:
@@ -3247,6 +3368,7 @@ def generate_report(all_results, version, overall_status, timing_info=None, skip
         
     except Exception as e:
         logger.error(f"Failed to create results bundle: {str(e)}")
+        logger.exception("Detailed traceback for bundle creation failure:")
         print(f"Warning: Could not create results bundle: {str(e)}\n")
 
 def main():
@@ -3360,6 +3482,66 @@ def main():
         except Exception as e:
             logger.error(f"Error getting version: {str(e)}")
         
+        # Check for version 4.1.1x - if detected, switch to root user
+        # This applies to all 4.1.1 variants (4.1.1, 4.1.1a, 4.1.1b, 4.1.1g, etc.)
+        if version and version.startswith('4.1.1'):
+            print(f"\n{WARNING} Detected ND version {version} - this version requires root access to run")
+            print(f"\nExecuting 'acs debug-token' to retrieve the root password token...")
+            
+            try:
+                # Execute acs debug-token command
+                token_cmd = node_manager.build_ssh_command(nd_ip, "acs debug-token") + " 2>/dev/null"
+                process = subprocess.Popen(token_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdout, stderr = process.communicate()
+                
+                if process.returncode == 0:
+                    debug_token = stdout.decode('utf-8').strip()
+                    # Remove any extra whitespace or newlines
+                    debug_token = debug_token.split('\n')[-1].strip() if '\n' in debug_token else debug_token
+                    
+                    if debug_token:
+                        print(f"\nRoot password token: {debug_token}")
+                        print(f"\nPlease enter the root password for Nexus Dashboard.")
+                        
+                        # Prompt for root password
+                        root_password = getpass.getpass("Enter root password: ")
+                        
+                        if root_password:
+                            # Update node_manager to use root credentials
+                            node_manager.username = "root"
+                            node_manager.password = root_password
+                            
+                            # Test the root credentials
+                            print(f"\nVerifying root credentials...")
+                            test_cmd = node_manager.build_ssh_command(nd_ip, "echo 'Root access verified'") + " 2>/dev/null"
+                            process = subprocess.Popen(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout, stderr = process.communicate()
+                            
+                            if process.returncode == 0 and 'Root access verified' in stdout.decode('utf-8'):
+                                print(f"{PASS} Successfully switched to root user")
+                                print(f"All subsequent operations will use root credentials\n")
+                                logger.info(f"Switched to root user for version 4.1.1g")
+                            else:
+                                print(f"{FAIL} Failed to verify root credentials. Please check the password.")
+                                print(f"Error: {stderr.decode('utf-8')}")
+                                return 1
+                        else:
+                            print(f"{FAIL} Root password is required for version 4.1.1")
+                            return 1
+                    else:
+                        print(f"{FAIL} Failed to retrieve debug token")
+                        logger.error(f"Empty debug token returned")
+                        return 1
+                else:
+                    print(f"{FAIL} Failed to execute 'acs debug-token' command")
+                    logger.error(f"acs debug-token failed: {stderr.decode('utf-8')}")
+                    return 1
+                    
+            except Exception as e:
+                print(f"{FAIL} Error retrieving debug token: {str(e)}")
+                logger.exception(f"Error in debug token retrieval")
+                return 1
+        
         # Discover nodes
         print("Discovering Nexus Dashboard nodes...")
         nodes = node_manager.discover_nodes()
@@ -3398,6 +3580,83 @@ def main():
                     'directories': over_threshold_dirs,
                     'error': error_msg
                 })
+        
+        # For versions below 4.1.1, check for large eventmonitoring log files
+        nodes_with_large_logs = []
+        if version and not version.startswith('4.1.1'):
+            print("\nChecking for large eventmonitoring log files...")
+            
+            for node in nodes:
+                # Skip inactive nodes
+                if node.get('status', '').lower() != 'active':
+                    logger.info(f"Skipping eventmonitoring check for inactive node {node['name']}")
+                    continue
+                
+                # Skip nodes that already failed disk space check
+                if any(issue['node']['name'] == node['name'] for issue in nodes_with_space_issues):
+                    continue
+                
+                print(f"Checking {node['name']}...", end=" ")
+                is_healthy, large_files, error_msg = node_manager.check_eventmonitoring_logs(node)
+                
+                if is_healthy:
+                    print(f"{PASS}")
+                else:
+                    print(f"{FAIL}")
+                    nodes_with_large_logs.append({
+                        'node': node,
+                        'large_files': large_files,
+                        'error': error_msg
+                    })
+        
+        # If any nodes have large log files, report them and exclude from validation
+        if nodes_with_large_logs:
+            print(f"\n{FAIL} Large Eventmonitoring Log Files Detected")
+            print("="*80)
+            print("The following nodes have eventmonitoring log files >= 1G:\n")
+            
+            for issue in nodes_with_large_logs:
+                node = issue['node']
+                large_files = issue['large_files']
+                
+                print(f"{node['name']} ({node['ip']}):")
+                if large_files:
+                    for file_size in large_files:
+                        print(f"  • File size: {file_size}")
+                else:
+                    print(f"  • {issue['error']}")
+                
+                print(f"  {WARNING} Tech support will not be collected for {node['name']}")
+                print(f"  Recommendation: Contact TAC to help resolve this issue before")
+                print(f"                  collecting tech support on {node['name']}\n")
+            
+            # Filter out nodes with large log files from the nodes list
+            failed_node_names = [issue['node']['name'] for issue in nodes_with_large_logs]
+            nodes = [node for node in nodes if node['name'] not in failed_node_names]
+            
+            if not nodes:
+                print(f"\n{FAIL} All nodes have large eventmonitoring log files. Cannot proceed with validation.")
+                print("Please resolve the eventmonitoring log issues and rerun the script.\n")
+                return 1
+            
+            print(f"{WARNING} Proceeding with validation on {len(nodes)} node(s) that passed the eventmonitoring check:")
+            for node in nodes:
+                print(f"  - {node['name']} ({node['ip']})")
+            
+            # Ask user for confirmation
+            while True:
+                choice = input(f"\nDo you want to continue with validation on {len(nodes)} node(s)? (y/n): ").lower().strip()
+                if choice in ['y', 'yes']:
+                    print("Proceeding with nodes that passed eventmonitoring check...")
+                    # Update node_manager to use only healthy nodes
+                    node_manager.nodes = nodes
+                    break
+                elif choice in ['n', 'no']:
+                    print("Validation cancelled by user.")
+                    return 0
+                else:
+                    print("Please enter 'y' for yes or 'n' for no.")
+            print()
         
         # If any nodes have space issues, report them and exclude from validation
         if nodes_with_space_issues:
@@ -3520,7 +3779,8 @@ def main():
         
         # Store skipped nodes information for final report
         skipped_nodes_info = {
-            'disk_space_issues': nodes_with_space_issues if nodes_with_space_issues else []
+            'disk_space_issues': nodes_with_space_issues if nodes_with_space_issues else [],
+            'large_log_files': nodes_with_large_logs if nodes_with_large_logs else []
         }
         
         # Process all nodes - resource-optimized
