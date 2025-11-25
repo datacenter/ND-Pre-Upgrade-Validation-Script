@@ -8,7 +8,7 @@ This script performs health checks on a Nexus Dashboard cluster:
 - Results are aggregated at the end for a comprehensive report
 
 Author: joelebla@cisco.com
-Version: 1.0.7 (Nov 20, 2025)
+Version: 1.0.8 (Nov 25, 2025)
 """
 
 import re
@@ -253,11 +253,34 @@ class SSHCommand:
             self.stdout, self.stderr = self.process.communicate(timeout=timeout)
             self.returncode = self.process.returncode
             
-            return (
-                self.stdout.decode('utf-8').strip(),
-                self.stderr.decode('utf-8').strip(),
-                self.returncode
-            )
+            stdout_str = self.stdout.decode('utf-8').strip()
+            stderr_str = self.stderr.decode('utf-8').strip()
+            
+            # If we got a failure with no error message, try to get the actual SSH error
+            if self.returncode != 0 and not stderr_str and not stdout_str:
+                logger.debug(f"Empty error output from sshpass, attempting direct SSH diagnostic")
+                try:
+                    # Build SSH options string
+                    ssh_opts = " ".join(self.node_manager.ssh_options)
+                    if self.node_manager.legacy_ssh_mode:
+                        ssh_opts += " -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa"
+                    
+                    # Try SSH without sshpass to see the actual error
+                    diagnostic_cmd = f"ssh {ssh_opts} -o BatchMode=yes {self.node_manager.username}@{self.node['ip']} 'echo test' 2>&1"
+                    logger.debug(f"Running diagnostic: {diagnostic_cmd}")
+                    
+                    diag_process = subprocess.Popen(diagnostic_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    diag_out, _ = diag_process.communicate(timeout=5)
+                    diag_output = diag_out.decode('utf-8').strip()
+                    
+                    if diag_output:
+                        logger.debug(f"Diagnostic output: {diag_output}")
+                        stderr_str = diag_output
+                except Exception as diag_e:
+                    logger.debug(f"Diagnostic command failed: {str(diag_e)}")
+            
+            return (stdout_str, stderr_str, self.returncode)
+            
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.stdout, self.stderr = self.process.communicate()
@@ -270,18 +293,11 @@ class SSHCommand:
             )
         
 def is_valid_ip(ip):
-    """Validate if the string is a valid IPv4 address"""
+    """Validate if the string is a valid IPv4 or IPv6 address"""
     try:
-        # Match IPv4 address
-        if not re.match(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$', ip):
-            return False
-        
-        # Check each octet is in range 0-255
-        octets = ip.split('.')
-        for octet in octets:
-            if int(octet) < 0 or int(octet) > 255:
-                return False
-                
+        import ipaddress
+        # Try to parse as IPv4 or IPv6
+        ipaddress.ip_address(ip)
         return True
     except (ValueError, AttributeError):
         return False
@@ -415,8 +431,12 @@ class NDNodeManager:
                 "-o PubkeyAcceptedKeyTypes=+ssh-rsa"
             ])
         
+        # Note: OpenSSH handles bare IPv6 addresses correctly in user@host format
+        # No need to wrap in brackets - this works for both IPv4 and IPv6
         ssh_opts_str = " ".join(ssh_opts)
-        return f"sshpass -p {shlex.quote(self.password)} ssh {ssh_opts_str} {self.username}@{node_ip} \"{command}\""
+        # Use SSHPASS environment variable method which is more reliable than -p flag
+        # This avoids issues with special characters in passwords and shell escaping
+        return f"SSHPASS={shlex.quote(self.password)} sshpass -e ssh {ssh_opts_str} {self.username}@{node_ip} \"{command}\""
     
     def build_scp_command(self, local_file, node_ip, remote_file):
         """Centralized SCP command builder with connection multiplexing"""
@@ -429,8 +449,11 @@ class NDNodeManager:
                 "-o PubkeyAcceptedKeyTypes=+ssh-rsa"
             ])
         
+        # Note: OpenSSH handles bare IPv6 addresses correctly in user@host format
+        # No need to wrap in brackets - this works for both IPv4 and IPv6
         ssh_opts_str = " ".join(ssh_opts)
-        return f"sshpass -p {shlex.quote(self.password)} scp {ssh_opts_str} {local_file} {self.username}@{node_ip}:{remote_file}"
+        # Use SSHPASS environment variable method which is more reliable than -p flag
+        return f"SSHPASS={shlex.quote(self.password)} sshpass -e scp {ssh_opts_str} {local_file} {self.username}@{node_ip}:{remote_file}"
     
     def enable_legacy_ssh_mode(self):
         """Enable legacy SSH mode (ssh-rsa) for compatibility with older ND versions"""
@@ -438,6 +461,67 @@ class NDNodeManager:
             self.legacy_ssh_mode = True
             logger.warning("Enabling legacy SSH mode (ssh-rsa) for compatibility with older Nexus Dashboard host keys")
             logger.warning("Note: ssh-rsa uses SHA-1 which has known weaknesses. Consider regenerating ND host keys with: ssh-keygen -A")
+    
+    def _check_crypto_policy(self):
+        """Check if system crypto policy is blocking ssh-rsa"""
+        rhel_based = False
+        try:
+            # Try to get current crypto policy (RHEL/CentOS/Fedora/Rocky/Alma)
+            result = subprocess.run(
+                ['update-crypto-policies', '--show'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode == 0:
+                rhel_based = True
+                policy = result.stdout.strip()
+                logger.info(f"Detected RHEL-based crypto policy: {policy}")
+                
+                if policy in ['DEFAULT', 'FUTURE', 'FIPS']:
+                    # These policies block SHA-1/ssh-rsa
+                    print(f"\n{FAIL} System crypto policy is blocking ssh-rsa connections")
+                    print(f"      Current policy: {policy}")
+                    print(f"\n      \033[1mRHEL/CentOS/Fedora 9+ blocks SHA-1 (used by ssh-rsa) at the system level.\033[0m")
+                    print(f"      Your Nexus Dashboard requires ssh-rsa, but the crypto policy prevents it.")
+                    print(f"\n      To fix this, enable the LEGACY crypto policy:")
+                    print(f"\n        \033[1;36msudo update-crypto-policies --set LEGACY\033[0m")
+                    print(f"\n      This allows ssh-rsa connections. After changing the policy:")
+                    print(f"        1. No service restart needed (change is immediate)")
+                    print(f"        2. Run this script again")
+                    print(f"\n      Alternative (more secure): Create custom policy for SSH only:")
+                    print(f"        sudo update-crypto-policies --set DEFAULT:SHA1")
+                    print(f"\n      See: https://access.redhat.com/articles/3642912")
+                    
+                    logger.error(f"Crypto policy {policy} is blocking ssh-rsa. User must enable LEGACY policy.")
+                    return True
+            
+        except FileNotFoundError:
+            logger.debug("update-crypto-policies not found - not a RHEL-based system")
+        except Exception as e:
+            logger.debug(f"Could not check RHEL crypto policy: {str(e)}")
+        
+        # If not RHEL-based or policy check didn't trigger, show generic message
+        if not rhel_based:
+            logger.warning("Legacy SSH failed - may be crypto policy issue on non-RHEL system")
+            print(f"\n{FAIL} SSH connection with legacy algorithms failed")
+            print(f"\n      \033[1mPossible cause: System crypto policy blocking SHA-1/ssh-rsa\033[0m")
+            print(f"      Modern Linux distributions (OpenSSL 3.0+) block weak cryptographic")
+            print(f"      algorithms including SHA-1, which is required for ssh-rsa.")
+            print(f"\n      Your system appears to be blocking ssh-rsa connections.")
+            print(f"\n      For Ubuntu/Debian systems:")
+            print(f"        Edit /etc/ssl/openssl.cnf and enable SHA-1 in the [provider_sect]")
+            print(f"        See: https://askubuntu.com/q/1233186")
+            print(f"\n      For other distributions:")
+            print(f"        Check your distribution's documentation for enabling legacy")
+            print(f"        cryptographic algorithms or SHA-1 support.")
+            print(f"\n      Verify the issue with:")
+            print(f"        ssh -vvv -o HostKeyAlgorithms=+ssh-rsa rescue-user@{self.nd_ip}")
+            print(f"        (Look for 'error in libcrypto' or similar crypto errors)")
+            return True
+        
+        return False
     
     def connect(self):
         """Connect to the main Nexus Dashboard node with automatic legacy SSH fallback"""
@@ -456,9 +540,21 @@ class NDNodeManager:
                     return True
                 
                 # Check if the error is specifically about host key negotiation
-                if "no matching host key type found" in error.lower() or "their offer: ssh-rsa" in error.lower():
-                    logger.warning(f"Modern SSH failed due to host key mismatch: {error}")
+                error_is_ssh_negotiation = (
+                    "no matching host key type found" in error.lower() or 
+                    "their offer: ssh-rsa" in error.lower() or 
+                    "unable to negotiate" in error.lower()
+                )
+                
+                # If we got a connection failure, try legacy mode
+                if returncode != 0 and (error_is_ssh_negotiation or not error.strip()):
+                    if error_is_ssh_negotiation:
+                        logger.warning(f"Modern SSH failed due to host key mismatch: {error}")
+                    else:
+                        logger.warning(f"SSH connection failed (likely ssh-rsa compatibility issue)")
+                    
                     logger.info("Attempting connection with legacy ssh-rsa support...")
+                    print(f"{WARNING} SSH connection failed - attempting legacy compatibility mode")
                     
                     # Enable legacy mode and retry
                     self.enable_legacy_ssh_mode()
@@ -469,17 +565,40 @@ class NDNodeManager:
                         
                         if returncode_retry == 0 and "Connected" in output_retry:
                             logger.info(f"Successfully connected using legacy SSH mode")
+                            print(f"{PASS} Successfully connected using legacy SSH mode")
+                            print(f"      Note: ssh-rsa uses SHA-1. Consider regenerating ND host keys")
+                            print(f"            with stronger algorithms (ssh-keygen -A on ND)")
                             return True
                         else:
+                            # Legacy SSH also failed - check for crypto policy issue
                             logger.error(f"Failed to connect even with legacy SSH: {error_retry}")
+                            
+                            # Check if this is a crypto policy issue (RHEL 9+)
+                            if "error in libcrypto" in error_retry.lower() or not error_retry.strip():
+                                crypto_policy_issue = self._check_crypto_policy()
+                                if crypto_policy_issue:
+                                    return False
+                            
+                            print(f"{FAIL} Failed to connect even with legacy SSH support")
+                            if error_retry.strip():
+                                print(f"      Error: {error_retry}")
+                            print(f"      Verify:")
+                            print(f"        - ND IP is correct: {self.nd_ip}")
+                            print(f"        - rescue-user credentials are correct")
+                            print(f"        - SSH port 22 is accessible")
+                            print(f"      Manual test: ssh -o HostKeyAlgorithms=+ssh-rsa rescue-user@{self.nd_ip}")
                             return False
                 else:
                     # Different error - not a host key issue
                     logger.error(f"Failed to connect to Nexus Dashboard: {error}")
+                    print(f"{FAIL} Failed to connect to Nexus Dashboard")
+                    if error.strip():
+                        print(f"      Error: {error}")
                     return False
                     
         except Exception as e:
             logger.exception(f"Error connecting to Nexus Dashboard: {str(e)}")
+            print(f"{FAIL} Exception during connection: {str(e)}")
             return False
     
     def disconnect(self):
@@ -720,6 +839,12 @@ class NDNodeManager:
                 # Get mount point (last column)
                 mount_point = parts[5]
                 
+                # Skip /tmp/isomount* directories - these are temporary ISO mount points
+                # 100% usage is normal when an upgrade ISO is mounted
+                if mount_point.startswith('/tmp/isomount'):
+                    logger.debug(f"{node['name']}: Skipping {mount_point} (ISO mount point)")
+                    continue
+                
                 # Check if usage >= 80%
                 if usage_pct >= 80:
                     over_threshold.append((mount_point, usage_pct))
@@ -851,69 +976,121 @@ class NDNodeManager:
         nodes = []
         logger.info("Parsing node information...")
         
-        # This is a new pattern specifically for output format with box-drawing characters
-        # It looks for lines with the node data that includes the role "Master"
-        master_pattern = re.compile(r'│\s+\*?([^\│]+?)\s+│\s+([^\│]+?)\s+│\s+([^\│]+?)\s+│\s+Master\s+│\s+([^\│]+?)\s+│\s+([^\│]+?)\s+│\s+([^\│]+?)\s+│')
+        # Parse line by line to handle multi-line format
+        lines = output.strip().splitlines()
+        node_dict = {}
+        current_node_name = None
         
-        # Find all matches
-        matches = master_pattern.findall(output)
-        
-        for match in matches:
-            node_name = match[0].strip()
-            if '*' in node_name:  # If there's an asterisk
-                node_name = node_name.replace('*', '').strip()
+        for line in lines:
+            # Skip separator lines and headers
+            if '─' in line or '+' in line or "NAME (*=SELF)" in line:
+                continue
+            
+            # Skip horizontal separator lines
+            if '──────────' in line or '----------' in line:
+                continue
                 
-            # Create node record
-            node = {
-                "name": node_name,
-                "serial": match[1].strip(),
-                "version": match[2].strip(),
-                "role": "Master",
-                "datanetwork": match[3].strip(),
-                "mgmtnetwork": match[4].strip(),
-                "status": match[5].strip()
-            }
+            # Check if this line has node data (contains │ or ¦)
+            # Some systems use │ (U+2502) and others use ¦ (U+00A6)
+            if '│' not in line and '¦' not in line:
+                continue
+            
+            # Split by the appropriate delimiter
+            delimiter = '│' if '│' in line else '¦'
+            parts = [p.strip() for p in line.split(delimiter)]
+            
+            # Filter out empty parts
+            parts = [p for p in parts if p]
+            
+            # Skip lines that are all dashes (separator between nodes)
+            if all('-' in p for p in parts if p):
+                continue
+            
+            # Need at least 7 parts: name, serial, version, role, datanet, mgmtnet, status
+            # OR could be continuation line with just datanet and mgmtnet
+            if len(parts) >= 7:
+                # This is a full node line with Master role
+                node_name = parts[0].replace('*', '').strip()
+                serial = parts[1].strip()
+                version = parts[2].strip()
+                role = parts[3].strip()
+                data_network = parts[4].strip()
+                mgmt_network = parts[5].strip()
+                status = parts[6].strip()
+                
+                if role == "Master":
+                    current_node_name = node_name
+                    
+                    # Create or update node record
+                    if node_name not in node_dict:
+                        node_dict[node_name] = {
+                            "name": node_name,
+                            "serial": serial,
+                            "version": version,
+                            "role": "Master",
+                            "datanetwork": [],
+                            "mgmtnetwork": [],
+                            "status": status
+                        }
+                    
+                    # Collect network addresses (skip placeholders like 0.0.0.0/0 and ::/0)
+                    if data_network and data_network not in ["0.0.0.0/0", "::/0"]:
+                        node_dict[node_name]["datanetwork"].append(data_network)
+                    if mgmt_network and mgmt_network not in ["0.0.0.0/0", "::/0"]:
+                        node_dict[node_name]["mgmtnetwork"].append(mgmt_network)
+                        
+            elif len(parts) >= 2 and current_node_name:
+                # This might be a continuation line with just network addresses
+                # These lines have empty fields followed by the IP addresses
+                # Format: │  │  │  │  │ 2001:6114:114::14/64 │ 2001:420:28e:2023::111:604/64 │  │
+                
+                # Find non-empty parts that look like IP addresses
+                for part in parts:
+                    if part and ('.' in part or ':' in part) and '/' in part:
+                        # This looks like an IP address with CIDR
+                        if ':' in part:
+                            # IPv6 - add to mgmt network (typically second column)
+                            if part != "0.0.0.0/0" and part != "::/0":
+                                # Determine if it's data or mgmt based on position
+                                # In the continuation line, data is usually before mgmt
+                                part_index = parts.index(part)
+                                if part_index == 0 or (len(parts) > 1 and part == parts[0]):
+                                    node_dict[current_node_name]["datanetwork"].append(part)
+                                else:
+                                    node_dict[current_node_name]["mgmtnetwork"].append(part)
+                        elif '.' in part:
+                            # IPv4
+                            if part != "0.0.0.0/0":
+                                part_index = parts.index(part)
+                                if part_index == 0:
+                                    node_dict[current_node_name]["datanetwork"].append(part)
+                                else:
+                                    node_dict[current_node_name]["mgmtnetwork"].append(part)
+        
+        # Convert node_dict to list and select primary IPs
+        for node_name, node_data in node_dict.items():
+            # Prefer IPv6 if available, fallback to IPv4
+            # For datanetwork: use first non-placeholder address
+            if node_data["datanetwork"]:
+                node_data["datanetwork"] = node_data["datanetwork"][0]
+            else:
+                node_data["datanetwork"] = "unknown"
+            
+            # For mgmtnetwork: use first non-placeholder address
+            if node_data["mgmtnetwork"]:
+                node_data["mgmtnetwork"] = node_data["mgmtnetwork"][0]
+            else:
+                node_data["mgmtnetwork"] = "unknown"
             
             # Extract IP address from mgmt network field
-            if '/' in node["mgmtnetwork"]:
-                node["ip"] = node["mgmtnetwork"].split('/')[0].strip()
+            if '/' in node_data["mgmtnetwork"]:
+                node_data["ip"] = node_data["mgmtnetwork"].split('/')[0].strip()
             else:
-                node["ip"] = node["mgmtnetwork"].strip()
-                
-            # Add to nodes list
-            nodes.append(node)
-            logger.debug(f"Added node: {node}")
+                node_data["ip"] = node_data["mgmtnetwork"].strip()
+            
+            nodes.append(node_data)
+            logger.debug(f"Added node: {node_data}")
         
-        if not nodes:
-            # Try alternative parsing as fallback with more debugging
-            logger.info("Regular parsing failed, trying simplified method...")
-            lines = output.strip().splitlines()
-            
-            for line in lines:
-                # Look for lines with "Master" role
-                if 'Master' in line and '│' in line:
-                    parts = [p.strip() for p in line.split('│') if p.strip()]
-                    if len(parts) >= 6:
-                        node_name = parts[0].replace('*', '').strip()
-                        
-                        # Create a node record
-                        node = {
-                            "name": node_name,
-                            "role": "Master",
-                            "datanetwork": parts[4] if len(parts) > 4 else "unknown",
-                            "mgmtnetwork": parts[5] if len(parts) > 5 else "unknown",
-                            "status": parts[6] if len(parts) > 6 else "Active"
-                        }
-                        
-                        # Extract IP address
-                        if '/' in node["mgmtnetwork"]:
-                            node["ip"] = node["mgmtnetwork"].split('/')[0].strip()
-                        else:
-                            node["ip"] = node["mgmtnetwork"].strip()
-                        
-                        nodes.append(node)
-                        logger.debug(f"Added node: {node}")
-            
         logger.info(f"Parsed {len(nodes)} nodes from output")
         return nodes
     
@@ -1043,7 +1220,8 @@ class TechSupportManager:
                 # Ask user to select a file
                 while True:
                     try:
-                        choice = input(f"\nSelect tech support file for {node['name']} (1-{len(display_info)}, or 0 to skip): ")
+                        range_str = str(len(display_info)) if len(display_info) == 1 else f"1-{len(display_info)}"
+                        choice = input(f"\nSelect tech support file for {node['name']} ({range_str}, or 0 to skip): ")
                         if choice == '0':
                             print(f"Skipping node {node['name']}.")
                             return None
@@ -2673,7 +2851,8 @@ def process_all_nodes(node_manager, tech_choice, debug_mode=False, skipped_nodes
             # Ask user to select a file
             while True:
                 try:
-                    choice = input(f"\nSelect tech support file for {node_name} (1-{len(tech_files)}, or 0 to skip): ")
+                    range_str = str(len(tech_files)) if len(tech_files) == 1 else f"1-{len(tech_files)}"
+                    choice = input(f"\nSelect tech support file for {node_name} ({range_str}, or 0 to skip): ")
                     if choice == '0':
                         print(f"Skipping node {node_name}.")
                         break

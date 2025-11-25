@@ -6,7 +6,7 @@ This is a standalone script that runs on each node to perform validation checks.
 It is loaded and packaged by the main script at runtime.
 
 Author: joelebla@cisco.com
-Version: 1.0.7 (Nov 20, 2025)
+Version: 1.0.8 (Nov 25, 2025)
 """
 
 # Future imports for Python 2/3 compatibility
@@ -620,51 +620,61 @@ def check_subnet_isolation():
         return
     
     # Parse the output to extract data and management network IPs
-    nodes_data = []
-    current_node = {}
-    skip_line = False
+    # Handle multi-line format where each node can have multiple lines (IPv4 + IPv6)
+    nodes_data = {}  # Use dict to accumulate IPs per node
+    current_node_name = None
     
     for line in output.strip().split('\n'):
         # Skip separator lines and headers
-        if '─' in line or "NAME (*=SELF)" in line:
-            continue
-            
-        # Skip continuation lines (empty first field)
-        if line.startswith('│ ') and len(line) > 2 and line[2] == ' ':
+        if '─' in line or '+' in line or "NAME (*=SELF)" in line:
             continue
             
         # Skip horizontal separators between nodes
-        if '-----------' in line:
-            skip_line = True
+        if '-----------' in line or '──────────' in line:
+            continue
+        
+        # Check if this line has node data (contains │ or ¦)
+        # Some systems use │ (U+2502) and others use ¦ (U+00A6)
+        if '│' not in line and '¦' not in line:
             continue
             
-        if skip_line:
-            skip_line = False
-            continue
-            
-        parts = line.split('│')
+        # Split by the appropriate delimiter
+        delimiter = '│' if '│' in line else '¦'
+        parts = line.split(delimiter)
         if len(parts) < 6:
+            continue
+        
+        # Skip lines that are all dashes (separator between nodes)
+        # Filter out empty parts first for checking
+        non_empty_parts = [p.strip() for p in parts if p.strip()]
+        if non_empty_parts and all('-' in p for p in non_empty_parts):
             continue
             
         # Extract node data
         node_name = parts[1].strip()
-        data_network = parts[5].strip()
-        mgmt_network = parts[6].strip()
+        data_network = parts[5].strip() if len(parts) > 5 else ""
+        mgmt_network = parts[6].strip() if len(parts) > 6 else ""
         
-        # Skip empty lines
-        if not node_name or not data_network or not mgmt_network:
-            continue
+        # Check if this is a new node or continuation line
+        if node_name:
+            # Remove asterisk from self node name
+            if node_name.startswith('*'):
+                node_name = node_name[1:].strip()
+            current_node_name = node_name
             
-        # Remove asterisk from self node name
-        if node_name.startswith('*'):
-            node_name = node_name[1:].strip()
-            
-        # Save node data
-        nodes_data.append({
-            'name': node_name,
-            'data_network': data_network,
-            'mgmt_network': mgmt_network
-        })
+            # Initialize node if not exists
+            if node_name not in nodes_data:
+                nodes_data[node_name] = {
+                    'name': node_name,
+                    'data_networks': [],
+                    'mgmt_networks': []
+                }
+        
+        # Add networks to current node (skip placeholders)
+        if current_node_name and data_network and data_network not in ["0.0.0.0/0", "::/0"]:
+            nodes_data[current_node_name]['data_networks'].append(data_network)
+        if current_node_name and mgmt_network and mgmt_network not in ["0.0.0.0/0", "::/0"]:
+            nodes_data[current_node_name]['mgmt_networks'].append(mgmt_network)
     
     if not nodes_data:
         print("[WARNING] Could not parse node network information")
@@ -675,76 +685,62 @@ def check_subnet_isolation():
     # Verify subnet isolation for each node
     all_pass = True
     
-    for node in nodes_data:
-        print("Checking network isolation for node: {0}".format(node['name']))
-        print("  Data Network: {0}".format(node['data_network']))
-        print("  Mgmt Network: {0}".format(node['mgmt_network']))
+    for node_name, node in nodes_data.items():
+        print("Checking network isolation for node: {0}".format(node_name))
         
-        # Extract IP addresses and subnets
-        data_ip = None
-        mgmt_ip = None
-        
-        # Extract data IP with CIDR if available
-        if node['data_network'] and node['data_network'] != "::/0":
-            data_ip = node['data_network']
-            if not '/' in data_ip:
-                data_ip += '/32'  # Default to host mask if CIDR not provided
+        # Check each combination of data and mgmt networks
+        for data_ip_raw in node['data_networks']:
+            for mgmt_ip_raw in node['mgmt_networks']:
+                print("  Data Network: {0}".format(data_ip_raw))
+                print("  Mgmt Network: {0}".format(mgmt_ip_raw))
                 
-        # Extract mgmt IP with CIDR if available
-        if node['mgmt_network'] and node['mgmt_network'] != "::/0":
-            mgmt_ip = node['mgmt_network']
-            if not '/' in mgmt_ip:
-                mgmt_ip += '/32'  # Default to host mask if CIDR not provided
-        
-        # Skip IPv6 placeholder addresses
-        if data_ip == "::/0" or mgmt_ip == "::/0":
-            print("  [INFO] Skipping IPv6 placeholder addresses")
-            continue
-            
-        if not data_ip or not mgmt_ip:
-            print("  [WARNING] Missing network information for node {0}".format(node['name']))
-            results["checks"]["subnet_check"]["status"] = "WARNING"
-            results["checks"]["subnet_check"]["details"].append("Missing network information for node {0}".format(node['name']))
-            all_pass = False
-            continue
-            
-        # Check if both networks are in the same subnet
-        try:
-            # Extract network parts
-            data_network = ipaddress.ip_network(unicode(data_ip.split('/')[0] + '/' + data_ip.split('/')[1]) if sys.version_info[0] < 3 else data_ip.split('/')[0] + '/' + data_ip.split('/')[1], strict=False)
-            mgmt_network = ipaddress.ip_network(unicode(mgmt_ip.split('/')[0] + '/' + mgmt_ip.split('/')[1]) if sys.version_info[0] < 3 else mgmt_ip.split('/')[0] + '/' + mgmt_ip.split('/')[1], strict=False)
-            
-            # Check if networks overlap
-            if data_network.overlaps(mgmt_network):
-                print("  [FAIL] Data and management networks are in the same subnet")
-                results["checks"]["subnet_check"]["status"] = "FAIL"
-                results["checks"]["subnet_check"]["details"].append(
-                    "Node {0} has data network {1} and management network {2} in the same subnet".format(
-                        node['name'], data_ip, mgmt_ip
-                    )
-                )
-                all_pass = False
-            else:
-                # Also check if data IP is in management subnet and vice versa
-                data_ip_addr = ipaddress.ip_address(unicode(data_ip.split('/')[0]) if sys.version_info[0] < 3 else data_ip.split('/')[0])
-                mgmt_ip_addr = ipaddress.ip_address(unicode(mgmt_ip.split('/')[0]) if sys.version_info[0] < 3 else mgmt_ip.split('/')[0])
+                # Add default CIDR if not provided
+                data_ip = data_ip_raw if '/' in data_ip_raw else data_ip_raw + '/32'
+                mgmt_ip = mgmt_ip_raw if '/' in mgmt_ip_raw else mgmt_ip_raw + '/32'
                 
-                if data_ip_addr in mgmt_network or mgmt_ip_addr in data_network:
-                    print("  [FAIL] Data and management IPs are in each other's subnets")
-                    results["checks"]["subnet_check"]["status"] = "FAIL"
-                    results["checks"]["subnet_check"]["details"].append(
-                        "Node {0} has overlapping data and management networks: {1}, {2}".format(
-                            node['name'], data_ip, mgmt_ip
+                # Check if both networks are in the same subnet
+                try:
+                    # Parse networks (works for both IPv4 and IPv6)
+                    data_network = ipaddress.ip_network(unicode(data_ip) if sys.version_info[0] < 3 else data_ip, strict=False)
+                    mgmt_network = ipaddress.ip_network(unicode(mgmt_ip) if sys.version_info[0] < 3 else mgmt_ip, strict=False)
+                    
+                    # Skip if comparing IPv4 with IPv6 (different families)
+                    if data_network.version != mgmt_network.version:
+                        print("  [INFO] Skipping comparison - different IP versions (IPv{0} vs IPv{1})".format(
+                            data_network.version, mgmt_network.version))
+                        continue
+                    
+                    # Check if networks overlap
+                    if data_network.overlaps(mgmt_network):
+                        print("  [FAIL] Data and management networks are in the same subnet")
+                        results["checks"]["subnet_check"]["status"] = "FAIL"
+                        results["checks"]["subnet_check"]["details"].append(
+                            "Node {0} has data network {1} and management network {2} in the same subnet".format(
+                                node_name, data_ip, mgmt_ip
+                            )
                         )
-                    )
+                        all_pass = False
+                    else:
+                        # Also check if data IP is in management subnet and vice versa
+                        data_ip_addr = ipaddress.ip_address(unicode(data_ip.split('/')[0]) if sys.version_info[0] < 3 else data_ip.split('/')[0])
+                        mgmt_ip_addr = ipaddress.ip_address(unicode(mgmt_ip.split('/')[0]) if sys.version_info[0] < 3 else mgmt_ip.split('/')[0])
+                        
+                        if data_ip_addr in mgmt_network or mgmt_ip_addr in data_network:
+                            print("  [FAIL] Data and management IPs are in each other's subnets")
+                            results["checks"]["subnet_check"]["status"] = "FAIL"
+                            results["checks"]["subnet_check"]["details"].append(
+                                "Node {0} has overlapping data and management networks: {1}, {2}".format(
+                                    node_name, data_ip, mgmt_ip
+                                )
+                            )
+                            all_pass = False
+                        else:
+                            print("  [PASS] Data and management networks are properly isolated")
+                except Exception as e:
+                    print("  [WARNING] Error checking subnet isolation: {0}".format(str(e)))
+                    results["checks"]["subnet_check"]["status"] = "WARNING"
+                    results["checks"]["subnet_check"]["details"].append("Error checking subnet isolation for {0}: {1}".format(node_name, str(e)))
                     all_pass = False
-                else:
-                    print("  [PASS] Data and management networks are properly isolated")
-        except Exception as e:
-            print("  [WARNING] Error checking subnet isolation: {0}".format(str(e)))
-            results["checks"]["subnet_check"]["status"] = "WARNING"
-            results["checks"]["subnet_check"]["details"].append("Error checking subnet isolation for {0}: {1}".format(node['name'], str(e)))
-            all_pass = False
     
     # Final status
     if all_pass:
@@ -818,12 +814,19 @@ def check_node_status():
         
         for line in lines:
             # Skip separator lines and headers
-            if '----' in line or '═' in line or "NAME (*=SELF)" in line:
+            if '----' in line or '═' in line or '+' in line or "NAME (*=SELF)" in line:
                 continue
             
-            # Check if this is a node line
-            if '│' in line:
-                parts = [p.strip() for p in line.split('│') if p.strip()]
+            # Check if this is a node line (contains │ or ¦)
+            # Some systems use │ (U+2502) and others use ¦ (U+00A6)
+            if '│' in line or '¦' in line:
+                delimiter = '│' if '│' in line else '¦'
+                parts = [p.strip() for p in line.split(delimiter) if p.strip()]
+                
+                # Skip lines that are all dashes (separator between nodes)
+                if parts and all('-' in p for p in parts):
+                    continue
+                
                 if len(parts) >= 4:  # Ensure we have enough columns
                     node_name = parts[0].replace('*', '').strip()
                     # Try to get version from column 3 (index 2) if available
@@ -944,6 +947,11 @@ def check_disk_space(tech_file):
                             break
                     
                     if use_percent is None or mount_point is None:
+                        continue
+                    
+                    # Skip /tmp/isomount* directories - these are temporary ISO mount points
+                    # 100% usage is normal when an upgrade ISO is mounted
+                    if mount_point.startswith('/tmp/isomount'):
                         continue
                     
                     try:
@@ -1068,6 +1076,11 @@ def check_disk_space(tech_file):
                         break
                 
                 if use_percent is None or mount_point is None:
+                    continue
+                
+                # Skip /tmp/isomount* directories - these are temporary ISO mount points
+                # 100% usage is normal when an upgrade ISO is mounted
+                if mount_point.startswith('/tmp/isomount'):
                     continue
                 
                 try:
@@ -1682,6 +1695,8 @@ def check_backup_failure(tech_file):
     2. Any backup job has status: InProgress (CSCwq57968)
     3. For MSO (cisco-mso namespace): InProgress on versions < 3.2.2f (CSCwm96512)
     
+    This check only applies to ND version >= 3.2
+    
     References: CSCwq57968, CSCwm96512
     """
     print_section("Checking Backup Job Status on {0}".format(NODE_NAME))
@@ -1691,6 +1706,43 @@ def check_backup_failure(tech_file):
     
     # Use file cache for faster file discovery
     cache = get_file_cache()
+    
+    # Get ND version first to check applicability
+    version_files = cache.find_files("acs-checks/acs_version")
+    nd_version = None
+    if version_files:
+        try:
+            with open(version_files[0], 'r') as f:
+                version_line = f.read().strip()
+                if "Nexus Dashboard" in version_line:
+                    nd_version = version_line.split("Nexus Dashboard")[1].strip()
+                else:
+                    nd_version = version_line
+                print("ND Version: {0}".format(nd_version))
+        except Exception as e:
+            print("[WARNING] Could not read version file: {0}".format(str(e)))
+    
+    # Parse version to check if < 3.2
+    if nd_version:
+        try:
+            version_parts = nd_version.split('.')
+            if len(version_parts) >= 2:
+                major = int(version_parts[0])
+                minor = int(version_parts[1])
+                
+                # Check if version < 3.2
+                if major < 3 or (major == 3 and minor < 2):
+                    print("[PASS] ND version {0} < 3.2 - Backup Failure check not applicable".format(nd_version))
+                    results["checks"]["backup_failure_check"]["status"] = "PASS"
+                    results["checks"]["backup_failure_check"]["details"] = [
+                        "Version below 3.2, check not applicable"
+                    ]
+                    return True
+                else:
+                    print("ND version {0} >= 3.2 - proceeding with Backup Failure check".format(nd_version))
+        except (ValueError, IndexError) as e:
+            print("[WARNING] Could not parse version for version check: {0}".format(str(e)))
+            # If we can't parse the version, continue with the check to be safe
     
     # Find k8-lifecycle.yaml file
     lifecycle_files = cache.find_files("k8-diag/kubectl/k8-lifecycle.yaml")
@@ -1879,9 +1931,10 @@ def check_backup_failure(tech_file):
     return True
 
 def ping(host):
-    """Ping a host and return True if successful"""
+    """Ping a host and return True if successful. Works with both IPv4 and IPv6."""
     try:
-        # Use shell=True with a full ping command instead of array
+        # On Nexus Dashboard, the regular 'ping' command handles both IPv4 and IPv6
+        # No need for separate ping6 command
         cmd = "ping -c 3 {0}".format(host)
         
         if sys.version_info[0] < 3:
@@ -2928,6 +2981,7 @@ def check_persistent_ip_config(tech_file):
     - falcon-diag/externalipconfigs.yaml (ND < 4.1)
     - k8-diag/kubectl/k8-externalipconfigs.yaml (ND >= 4.1)
     
+    This check only applies to ND version >= 3.2
     This is critical for upgrade success in some deployment scenarios.
     """
     print_section("Checking Persistent IP Configuration on {0}".format(NODE_NAME))
@@ -2937,6 +2991,43 @@ def check_persistent_ip_config(tech_file):
     
     # Use file cache for faster file discovery
     cache = get_file_cache()
+    
+    # Get ND version first to check applicability
+    version_files = cache.find_files("acs-checks/acs_version")
+    nd_version = None
+    if version_files:
+        try:
+            with open(version_files[0], 'r') as f:
+                version_line = f.read().strip()
+                if "Nexus Dashboard" in version_line:
+                    nd_version = version_line.split("Nexus Dashboard")[1].strip()
+                else:
+                    nd_version = version_line
+                print("ND Version: {0}".format(nd_version))
+        except Exception as e:
+            print("[WARNING] Could not read version file: {0}".format(str(e)))
+    
+    # Parse version to check if < 3.2
+    if nd_version:
+        try:
+            version_parts = nd_version.split('.')
+            if len(version_parts) >= 2:
+                major = int(version_parts[0])
+                minor = int(version_parts[1])
+                
+                # Check if version < 3.2
+                if major < 3 or (major == 3 and minor < 2):
+                    print("[PASS] ND version {0} < 3.2 - Persistent IP check not applicable".format(nd_version))
+                    results["checks"]["persistent_ip_check"]["status"] = "PASS"
+                    results["checks"]["persistent_ip_check"]["details"] = [
+                        "Version below 3.2, check not applicable"
+                    ]
+                    return True
+                else:
+                    print("ND version {0} >= 3.2 - proceeding with Persistent IP check".format(nd_version))
+        except (ValueError, IndexError) as e:
+            print("[WARNING] Could not parse version for version check: {0}".format(str(e)))
+            # If we can't parse the version, continue with the check to be safe
     
     # Try both possible external IP config file paths
     config_files = []
