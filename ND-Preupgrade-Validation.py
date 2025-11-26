@@ -8,7 +8,7 @@ This script performs health checks on a Nexus Dashboard cluster:
 - Results are aggregated at the end for a comprehensive report
 
 Author: joelebla@cisco.com
-Version: 1.0.8 (Nov 25, 2025)
+Version: 1.0.9 (Nov 26, 2025)
 """
 
 import re
@@ -982,28 +982,61 @@ class NDNodeManager:
         current_node_name = None
         
         for line in lines:
-            # Skip separator lines and headers
-            if '─' in line or '+' in line or "NAME (*=SELF)" in line:
+            # Skip header line
+            if "NAME (*=SELF)" in line:
+                logger.debug(f"Skipping header line: {line[:50]}...")
                 continue
             
-            # Skip horizontal separator lines
+            # Skip table border lines (lines that are primarily + and - characters)
+            # These look like: +--------------------+----------------+----------+
+            stripped = line.strip()
+            if stripped and all(c in '+-─═│┌┐└┘├┤┬┴┼' for c in stripped):
+                logger.debug(f"Skipping table border line: {line[:50]}...")
+                continue
+            
+            # Skip horizontal separator lines between nodes
             if '──────────' in line or '----------' in line:
+                logger.debug(f"Skipping horizontal separator: {line[:50]}...")
                 continue
                 
-            # Check if this line has node data (contains │ or ¦)
-            # Some systems use │ (U+2502) and others use ¦ (U+00A6)
-            if '│' not in line and '¦' not in line:
+            # Check if this line has node data (contains │ or ¦ or any vertical bar-like character)
+            # Look for any character that could be a vertical separator (ord 166, 124, 9474, etc.)
+            has_separator = False
+            delimiter = None
+            for char in ['│', '¦', '|']:  # Box drawing, broken bar, pipe
+                if char in line:
+                    has_separator = True
+                    delimiter = char
+                    break
+            
+            if not has_separator:
+                # Try to find any vertical bar-like character by checking character codes
+                for char in line:
+                    if ord(char) in [124, 166, 9474, 9475, 9476]:  # |, ¦, │, ╡, ╢
+                        has_separator = True
+                        delimiter = char
+                        break
+            
+            if not has_separator:
+                logger.debug(f"No separator found in line: {line[:50]}...")
                 continue
             
-            # Split by the appropriate delimiter
-            delimiter = '│' if '│' in line else '¦'
+            logger.debug(f"Processing line with delimiter '{delimiter}' (ord={ord(delimiter)}): {line[:60]}...")
+            
+            # Split by the delimiter
             parts = [p.strip() for p in line.split(delimiter)]
             
             # Filter out empty parts
             parts = [p for p in parts if p]
             
+            # Debug: log the parts after filtering
+            if parts:
+                logger.debug(f"Filtered parts ({len(parts)}): {parts}")
+            
             # Skip lines that are all dashes (separator between nodes)
-            if all('-' in p for p in parts if p):
+            # These look like: ¦ ------------------ ¦ -------------- ¦ -------- ¦
+            if parts and all(all(c == '-' for c in p) for p in parts):
+                logger.debug(f"Skipping separator line with all dashes")
                 continue
             
             # Need at least 7 parts: name, serial, version, role, datanet, mgmtnet, status
@@ -1018,8 +1051,12 @@ class NDNodeManager:
                 mgmt_network = parts[5].strip()
                 status = parts[6].strip()
                 
-                if role == "Master":
+                logger.debug(f"Checking node: name={node_name}, role={role}, status={status}")
+                
+                # Check for Master role (case insensitive)
+                if role.lower() == "master":
                     current_node_name = node_name
+                    logger.debug(f"Processing Master node: {node_name}")
                     
                     # Create or update node record
                     if node_name not in node_dict:
@@ -1032,12 +1069,15 @@ class NDNodeManager:
                             "mgmtnetwork": [],
                             "status": status
                         }
+                        logger.debug(f"Created node entry for: {node_name}")
                     
                     # Collect network addresses (skip placeholders like 0.0.0.0/0 and ::/0)
                     if data_network and data_network not in ["0.0.0.0/0", "::/0"]:
                         node_dict[node_name]["datanetwork"].append(data_network)
+                        logger.debug(f"Added data network {data_network} to {node_name}")
                     if mgmt_network and mgmt_network not in ["0.0.0.0/0", "::/0"]:
                         node_dict[node_name]["mgmtnetwork"].append(mgmt_network)
+                        logger.debug(f"Added mgmt network {mgmt_network} to {node_name}")
                         
             elif len(parts) >= 2 and current_node_name:
                 # This might be a continuation line with just network addresses

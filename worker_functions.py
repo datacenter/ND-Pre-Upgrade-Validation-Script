@@ -6,7 +6,7 @@ This is a standalone script that runs on each node to perform validation checks.
 It is loaded and packaged by the main script at runtime.
 
 Author: joelebla@cisco.com
-Version: 1.0.8 (Nov 25, 2025)
+Version: 1.0.9 (Nov 26, 2025)
 """
 
 # Future imports for Python 2/3 compatibility
@@ -624,22 +624,58 @@ def check_subnet_isolation():
     nodes_data = {}  # Use dict to accumulate IPs per node
     current_node_name = None
     
+    # Debug: print first few lines to diagnose parsing issues
+    lines = output.strip().split('\n')
+    if len(lines) > 0:
+        print("[DEBUG] First line of acs show nodes output: {0}".format(repr(lines[0][:60])))
+        if len(lines) > 3:
+            print("[DEBUG] Fourth line (first data): {0}".format(repr(lines[3][:60])))
+            # Check character codes in the line
+            if lines[3]:
+                first_char = lines[3][0]
+                print("[DEBUG] First character code: ord({0}) = {1}".format(repr(first_char), ord(first_char)))
+    
     for line in output.strip().split('\n'):
-        # Skip separator lines and headers
-        if '─' in line or '+' in line or "NAME (*=SELF)" in line:
-            continue
-            
-        # Skip horizontal separators between nodes
-        if '-----------' in line or '──────────' in line:
+        # Skip header line
+        if "NAME (*=SELF)" in line:
             continue
         
-        # Check if this line has node data (contains │ or ¦)
-        # Some systems use │ (U+2502) and others use ¦ (U+00A6)
-        if '│' not in line and '¦' not in line:
+        # Skip table border lines (check if all chars are border characters)
+        # Use character code checks for Python 2/3 compatibility
+        stripped = line.strip()
+        if stripped:
+            is_border = True
+            for c in stripped:
+                char_code = ord(c)
+                # Check for: + (43), - (45), | (124), box drawing chars (9474-9532), broken bar (166)
+                if char_code not in [43, 45, 124, 166] and not (9474 <= char_code <= 9532):
+                    is_border = False
+                    break
+            if is_border:
+                continue
+            
+        # Skip horizontal separators between nodes
+        if '-----------' in line:
+            continue
+        
+        # Check if this line has node data (check for vertical bar characters by code)
+        # 9474 = U+2502 (│), 166 = U+00A6 (¦)
+        has_separator = False
+        for c in line:
+            if ord(c) in [9474, 166]:
+                has_separator = True
+                break
+        if not has_separator:
             continue
             
-        # Split by the appropriate delimiter
-        delimiter = '│' if '│' in line else '¦'
+        # Split by the appropriate delimiter (detect by character code)
+        delimiter = None
+        for c in line:
+            if ord(c) in [9474, 166]:  # │ or ¦
+                delimiter = c
+                break
+        if not delimiter:
+            continue
         parts = line.split(delimiter)
         if len(parts) < 6:
             continue
@@ -647,7 +683,7 @@ def check_subnet_isolation():
         # Skip lines that are all dashes (separator between nodes)
         # Filter out empty parts first for checking
         non_empty_parts = [p.strip() for p in parts if p.strip()]
-        if non_empty_parts and all('-' in p for p in non_empty_parts):
+        if non_empty_parts and all(all(c == '-' for c in p) for p in non_empty_parts):
             continue
             
         # Extract node data
@@ -812,19 +848,47 @@ def check_node_status():
         non_active_nodes = []
         cluster_versions = {}
         
+        # Debug: print first few lines
+        if len(lines) > 0:
+            print("[DEBUG] check_node_status - First line: {0}".format(repr(lines[0][:60])))
+            if len(lines) > 3:
+                print("[DEBUG] check_node_status - Fourth line: {0}".format(repr(lines[3][:60])))
+                if lines[3]:
+                    print("[DEBUG] First char code: {0}".format(ord(lines[3][0])))
+        
         for line in lines:
-            # Skip separator lines and headers
-            if '----' in line or '═' in line or '+' in line or "NAME (*=SELF)" in line:
+            # Skip header line
+            if "NAME (*=SELF)" in line:
                 continue
             
-            # Check if this is a node line (contains │ or ¦)
-            # Some systems use │ (U+2502) and others use ¦ (U+00A6)
-            if '│' in line or '¦' in line:
-                delimiter = '│' if '│' in line else '¦'
+            # Skip table border lines (check if all chars are border characters)
+            stripped = line.strip()
+            if stripped:
+                is_border = True
+                for c in stripped:
+                    char_code = ord(c)
+                    if char_code not in [43, 45, 124, 166] and not (9474 <= char_code <= 9532):
+                        is_border = False
+                        break
+                if is_border:
+                    continue
+            
+            # Skip horizontal separator lines
+            if '----------' in line:
+                continue
+            
+            # Check if this is a node line (check for vertical bar by code)
+            delimiter = None
+            for c in line:
+                if ord(c) in [9474, 166]:  # │ or ¦
+                    delimiter = c
+                    break
+            
+            if delimiter:
                 parts = [p.strip() for p in line.split(delimiter) if p.strip()]
                 
                 # Skip lines that are all dashes (separator between nodes)
-                if parts and all('-' in p for p in parts):
+                if parts and all(all(c == '-' for c in p) for p in parts):
                     continue
                 
                 if len(parts) >= 4:  # Ensure we have enough columns
@@ -2550,13 +2614,52 @@ def check_ping_reachability():
     
     # Extract IPs from node output
     node_ips = []
+    
+    # Debug: print first few lines
+    lines = output.strip().split('\n')
+    if len(lines) > 0:
+        print("[DEBUG] ping_check - First line: {0}".format(repr(lines[0][:60])))
+        if len(lines) > 3:
+            print("[DEBUG] ping_check - Fourth line: {0}".format(repr(lines[3][:60])))
+            if lines[3]:
+                print("[DEBUG] First char code: {0}".format(ord(lines[3][0])))
+    
     for line in output.strip().split('\n'):
-        # Skip separator lines and headers
-        if '─' in line or '-' * 10 in line or "NAME (*=SELF)" in line:
+        # Skip header line
+        if "NAME (*=SELF)" in line:
+            continue
+        
+        # Skip table border lines
+        stripped = line.strip()
+        if stripped:
+            is_border = True
+            for c in stripped:
+                char_code = ord(c)
+                if char_code not in [43, 45, 124, 166] and not (9474 <= char_code <= 9532):
+                    is_border = False
+                    break
+            if is_border:
+                continue
+        
+        # Skip horizontal separator lines
+        if '----------' in line:
+            continue
+        
+        # Check for delimiter by character code
+        delimiter = None
+        for c in line:
+            if ord(c) in [9474, 166]:  # │ or ¦
+                delimiter = c
+                break
+        if not delimiter:
             continue
             
-        parts = [p.strip() for p in line.split('│') if p]
+        parts = [p.strip() for p in line.split(delimiter) if p.strip()]
         if not parts or len(parts) < 6:  # Need at least name, data and mgmt IPs
+            continue
+        
+        # Skip lines that are all dashes (separator between nodes)
+        if parts and all(all(c == '-' for c in p) for p in parts):
             continue
             
         # Get node name and clean it up
@@ -2564,10 +2667,6 @@ def check_ping_reachability():
         
         # Skip empty lines or blank name fields
         if not node_name or node_name == NODE_NAME:
-            continue
-        
-        # Skip lines with dashes (separator rows)
-        if '-' * 5 in node_name:
             continue
             
         # Get data and management IPs - may be in different positions based on output format
