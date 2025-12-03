@@ -8,6 +8,8 @@ The script can be run from any Linux server with the required dependencies. If A
 - Due to a /tmp permissions discrepancy, running the script on 4.1.1g requires root access.
 - If you have feedback or are encountering an issue running the script, please send an email to nd-preupgrade-validation@cisco.com
 
+![ND-Pre-Upgrade-Validation_Walkthrough](https://github.com/user-attachments/assets/0bcbc1f0-98c0-4e8f-8cfe-20265f52779e)
+
 ## Table of Contents
 
 - [Checks](#checks)
