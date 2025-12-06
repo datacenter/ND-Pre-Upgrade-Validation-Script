@@ -8,7 +8,7 @@ This script performs health checks on a Nexus Dashboard cluster:
 - Results are aggregated at the end for a comprehensive report
 
 Author: joelebla@cisco.com
-Version: 1.0.9 (Nov 26, 2025)
+Version: 1.0.10 (Dec 3, 2025)
 """
 
 import re

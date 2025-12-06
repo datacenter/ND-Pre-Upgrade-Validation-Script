@@ -6,7 +6,7 @@ This is a standalone script that runs on each node to perform validation checks.
 It is loaded and packaged by the main script at runtime.
 
 Author: joelebla@cisco.com
-Version: 1.0.9 (Nov 26, 2025)
+Version: 1.0.10 (Dec 3, 2025)
 """
 
 # Future imports for Python 2/3 compatibility
@@ -3071,6 +3071,73 @@ def check_lvm_pvs(tech_file):
         }
         return False
 
+def get_cluster_node_count():
+    """
+    Get the number of active nodes in the cluster from acs show nodes output.
+    Returns the count of nodes with Master role and Active status.
+    """
+    try:
+        cmd = "acs show nodes"
+        output = run_command(cmd)
+        
+        if not output:
+            print("[WARNING] Could not retrieve node information for node count")
+            return None
+        
+        node_count = 0
+        lines = output.strip().split('\n')
+        
+        for line in lines:
+            # Skip header and border lines
+            if "NAME (*=SELF)" in line or not line.strip():
+                continue
+            
+            # Skip table border lines
+            stripped = line.strip()
+            if stripped:
+                is_border = True
+                for c in stripped:
+                    char_code = ord(c)
+                    if char_code not in [43, 45, 124, 166] and not (9474 <= char_code <= 9532):
+                        is_border = False
+                        break
+                if is_border:
+                    continue
+            
+            # Skip horizontal separators
+            if '----------' in line:
+                continue
+            
+            # Check if this is a node line
+            delimiter = None
+            for c in line:
+                if ord(c) in [9474, 166]:  # │ or ¦
+                    delimiter = c
+                    break
+            
+            if delimiter:
+                parts = [p.strip() for p in line.split(delimiter) if p.strip()]
+                
+                # Skip lines that are all dashes
+                if parts and all(all(c == '-' for c in p) for p in parts):
+                    continue
+                
+                # Need at least 7 parts for a valid node line
+                if len(parts) >= 7:
+                    role = parts[3].strip()
+                    status = parts[6].strip()
+                    
+                    # Count nodes with Master role and Active status
+                    if role.lower() == "master" and "active" in status.lower():
+                        node_count += 1
+        
+        print("[INFO] Detected {0} active node(s) in cluster".format(node_count))
+        return node_count
+        
+    except Exception as e:
+        print("[WARNING] Error counting cluster nodes: {0}".format(str(e)))
+        return None
+
 @robust_check("persistent_ip_check")
 def check_persistent_ip_config(tech_file):
     """
@@ -3079,6 +3146,10 @@ def check_persistent_ip_config(tech_file):
     Validates external IP configurations from:
     - falcon-diag/externalipconfigs.yaml (ND < 4.1)
     - k8-diag/kubectl/k8-externalipconfigs.yaml (ND >= 4.1)
+    
+    Required persistent IPs:
+    - Single node cluster (1 node): 3 persistent IPs
+    - Multi-node cluster (3+ nodes): 5 persistent IPs
     
     This check only applies to ND version >= 3.2
     This is critical for upgrade success in some deployment scenarios.
@@ -3128,6 +3199,24 @@ def check_persistent_ip_config(tech_file):
             print("[WARNING] Could not parse version for version check: {0}".format(str(e)))
             # If we can't parse the version, continue with the check to be safe
     
+    # Determine cluster size and required persistent IP count
+    node_count = get_cluster_node_count()
+    
+    # Set required IP count based on cluster size
+    if node_count == 1:
+        required_ip_count = 3
+        print("[INFO] Single-node cluster detected - requiring {0} persistent IPs".format(required_ip_count))
+    elif node_count is not None and node_count >= 3:
+        required_ip_count = 5
+        print("[INFO] Multi-node cluster ({0} nodes) detected - requiring {1} persistent IPs".format(node_count, required_ip_count))
+    else:
+        # Default to 5 IPs if we can't determine node count or have 2 nodes (unusual case)
+        required_ip_count = 5
+        if node_count is None:
+            print("[WARNING] Could not determine cluster size - defaulting to {0} persistent IP requirement".format(required_ip_count))
+        else:
+            print("[INFO] {0}-node cluster detected - requiring {1} persistent IPs".format(node_count, required_ip_count))
+    
     # Try both possible external IP config file paths
     config_files = []
     
@@ -3171,7 +3260,7 @@ def check_persistent_ip_config(tech_file):
             "This could indicate no persistent IPs are configured, or the tech support is incomplete."
         )
         results["checks"]["persistent_ip_check"]["recommendation"] = (
-            "Verify that at least 5 persistent IP addresses are properly configured before proceeding with upgrade."
+            "Verify that at least {0} persistent IP addresses are properly configured before proceeding with upgrade.".format(required_ip_count)
         )
         results["checks"]["persistent_ip_check"]["reference"] = (
             "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
@@ -3208,8 +3297,8 @@ def check_persistent_ip_config(tech_file):
                 "The Persistent IP configuration file exists but does not contain the expected YAML structure."
             )
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "Verify that at least 5 persistent IP addresses are properly configured before proceeding with upgrade.\n  "
-                "Check the Nexus Dashboard configuration for external IP settings."
+                "Verify that at least {0} persistent IP addresses are properly configured before proceeding with upgrade.\n  "
+                "Check the Nexus Dashboard configuration for external IP settings.".format(required_ip_count)
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
                 "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
@@ -3294,27 +3383,29 @@ def check_persistent_ip_config(tech_file):
             print("[FAIL] Found 0 persistent IP addresses in data-external-services")
             results["checks"]["persistent_ip_check"]["status"] = "FAIL"
             results["checks"]["persistent_ip_check"]["details"] = [
-                "Found 0 persistent IP addresses in data-external-services configuration",
+                "Found 0 persistent IP addresses in data-external-services configuration (required: {0})".format(required_ip_count),
             ]
             results["checks"]["persistent_ip_check"]["explanation"] = (
                 "The Nexus Dashboard data-external-services configuration has ZERO Persistent IP addresses.\n  "
-                "This will likely result in upgrade failure as persistent IPs are required for data services."
+                "This will likely result in upgrade failure as persistent IPs are required for data services.\n  "
+                "Required: {0} persistent IPs for a {1}-node cluster.".format(required_ip_count, node_count if node_count else "unknown")
             )
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+                "1. Configure at least {0} persistent IP addresses for data-external-services before attempting upgrade.\n  "
                 "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
                 "3. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  "
-                "4. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
+                "4. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation.".format(required_ip_count)
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
                 "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
                 "cisco-nexus-dashboard-deployment-guide-41x/nd-prerequisites-41x.html#concept_zkj_3hj_cgc"
             )
-        elif data_external_ips < 5:
-            print("[FAIL] Found {0} persistent IP addresses in data-external-services (less than the required minimum of 5)".format(data_external_ips))
+        elif data_external_ips < required_ip_count:
+            print("[FAIL] Found {0} persistent IP addresses in data-external-services (less than the required minimum of {1})".format(data_external_ips, required_ip_count))
             results["checks"]["persistent_ip_check"]["status"] = "FAIL"
             results["checks"]["persistent_ip_check"]["details"] = [
-                "Found {0} persistent IP addresses in data-external-services (less than the required minimum of 5)".format(data_external_ips)
+                "Found {0} persistent IP addresses in data-external-services (required: {1} for {2}-node cluster)".format(
+                    data_external_ips, required_ip_count, node_count if node_count else "unknown")
             ]
             
             # Add details about data-external-services configuration
@@ -3326,31 +3417,34 @@ def check_persistent_ip_config(tech_file):
             
             results["checks"]["persistent_ip_check"]["explanation"] = (
                 "The Nexus Dashboard data-external-services is configured with {0} Persistent IP addresses,\n  "
-                "which is less than the required minimum of 5. This will likely result in upgrade failure.".format(data_external_ips)
+                "which is less than the required minimum of {1} for a {2}-node cluster.\n  "
+                "This will likely result in upgrade failure.".format(data_external_ips, required_ip_count, node_count if node_count else "unknown")
             )
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+                "1. Configure at least {0} persistent IP addresses for data-external-services before attempting upgrade.\n  "
                 "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
                 "3. Re-run the Pre-upgrade script to confirm the check is now a PASS.\n  "
-                "4. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation."
+                "4. If the check is still a FAIL, contact Cisco TAC for assistance in verification/remediation.".format(required_ip_count)
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
                 "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
                 "cisco-nexus-dashboard-deployment-guide-41x/nd-prerequisites-41x.html#concept_zkj_3hj_cgc"
             )
         else:
-            print("[PASS] Found {0} persistent IP addresses (meets minimum requirement of 5)".format(data_external_ips))
+            print("[PASS] Found {0} persistent IP addresses (meets minimum requirement of {1} for {2}-node cluster)".format(
+                data_external_ips, required_ip_count, node_count if node_count else "unknown"))
             results["checks"]["persistent_ip_check"]["status"] = "PASS"
             results["checks"]["persistent_ip_check"]["details"] = [
-                "Found {0} persistent IP addresses (meets minimum requirement of 5)".format(data_external_ips)
+                "Found {0} persistent IP addresses (required: {1} for {2}-node cluster)".format(
+                    data_external_ips, required_ip_count, node_count if node_count else "unknown")
             ]
         
         # Add common fields for WARNING cases only (FAIL cases have specific recommendations above)
         if results["checks"]["persistent_ip_check"]["status"] in ["WARN", "WARNING"]:
             results["checks"]["persistent_ip_check"]["recommendation"] = (
-                "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+                "1. Configure at least {0} persistent IP addresses for data-external-services before attempting upgrade.\n  "
                 "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
-                "3. Contact Cisco TAC for assistance in verification/remediation if required."
+                "3. Contact Cisco TAC for assistance in verification/remediation if required.".format(required_ip_count)
             )
             results["checks"]["persistent_ip_check"]["reference"] = (
                 "https://www.cisco.com/c/en/us/td/docs/dcn/nd/4x/deployment/"
@@ -3368,9 +3462,9 @@ def check_persistent_ip_config(tech_file):
             "Could not determine persistent IP configuration due to parsing error"
         )
         results["checks"]["persistent_ip_check"]["recommendation"] = (
-            "1. Configure at least 5 persistent IP addresses for data-external-services before attempting upgrade.\n  "
+            "1. Configure at least {0} persistent IP addresses for data-external-services before attempting upgrade.\n  "
             "2. Consult the Nexus Dashboard deployment guide for proper persistent IP configuration.\n  "
-            "3. Contact Cisco TAC for assistance in verification/remediation if required."
+            "3. Contact Cisco TAC for assistance in verification/remediation if required.".format(required_ip_count)
         )
         return False
     
